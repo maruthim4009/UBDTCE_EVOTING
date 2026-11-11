@@ -36,6 +36,7 @@ export default function HODDashboard({ currentUser, onLogout }) {
 
   const [studentSearch, setStudentSearch] = useState("");
   const [filterYear, setFilterYear] = useState("");
+  const [filterAcademicYear, setFilterAcademicYear] = useState("");
   const [filterSemester, setFilterSemester] = useState("");
   const [selectedStudents, setSelectedStudents] = useState([]);
   const [studentPage, setStudentPage] = useState(1);
@@ -47,6 +48,7 @@ export default function HODDashboard({ currentUser, onLogout }) {
     email: "",
     semester: "",
     admission_year: "",
+    academic_year: "",
   });
 
   const [studentSubmitting, setStudentSubmitting] = useState(false);
@@ -56,10 +58,12 @@ const [classesBranch, setClassesBranch] = useState("");
 const [classesLoading, setClassesLoading] = useState(false);
 const [classesError, setClassesError] = useState("");
 const [classYearFilter, setClassYearFilter] = useState("");
+const [classAcademicYearFilter, setClassAcademicYearFilter] = useState("");
 const [classSemesterFilter, setClassSemesterFilter] = useState("");
   const [individualAddMessage, setIndividualAddMessage] = useState("");
 
   const [importYear, setImportYear] = useState(defaultAdmissionYear);
+  const [importAcademicYear, setImportAcademicYear] = useState("");
   const [importSemester, setImportSemester] = useState("");
   const [importFile, setImportFile] = useState(null);
   const [importMessage, setImportMessage] = useState("");
@@ -70,7 +74,7 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
   const [electionError, setElectionError] = useState("");
   const [electionMessage, setElectionMessage] = useState("");
   const [electionForm, setElectionForm] = useState({
-    title: "", description: "", election_type: "CR", admission_year: "", semester: "", duration_minutes: "30",
+    title: "", description: "", election_type: "CR", admission_year: "", academic_year: "", semester: "", duration_minutes: "30",
   });
   const [selectedElectionId, setSelectedElectionId] = useState("");
   const [candidates, setCandidates] = useState([]);
@@ -96,12 +100,15 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
   const yearMatches =
     !classYearFilter ||
     String(classItem.admission_year) === classYearFilter;
+  const academicYearMatches =
+    !classAcademicYearFilter ||
+    String(classItem.academic_year || "") === classAcademicYearFilter;
 
   const semesterMatches =
     !classSemesterFilter ||
     String(classItem.semester) === classSemesterFilter;
 
-  return yearMatches && semesterMatches;
+  return yearMatches && academicYearMatches && semesterMatches;
 });
   const fullName = currentUser?.full_name || "Department Head";
 
@@ -118,6 +125,9 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
       const yearMatches =
         !filterYear ||
         String(student.admission_year || "") === String(filterYear);
+      const academicYearMatches =
+        !filterAcademicYear ||
+        String(student.academic_year || "") === String(filterAcademicYear);
 
       const semesterMatches =
         !filterSemester ||
@@ -131,9 +141,9 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
         String(student.usn || "").toLowerCase().includes(search) ||
         String(student.email || "").toLowerCase().includes(search);
 
-      return yearMatches && semesterMatches && searchMatches;
+      return yearMatches && academicYearMatches && semesterMatches && searchMatches;
     });
-  }, [students, filterYear, filterSemester, studentSearch]);
+  }, [students, filterYear, filterAcademicYear, filterSemester, studentSearch]);
 
   const allVisibleSelected =
     visibleStudents.length > 0 &&
@@ -194,6 +204,9 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
     if (filterYear) {
       params.set("admission_year", filterYear);
     }
+    if (filterAcademicYear) {
+      params.set("academic_year", filterAcademicYear);
+    }
 
     const response = await fetch(
       `${API_BASE}/students?${params.toString()}`,
@@ -230,7 +243,7 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
     }
     // loadStudents intentionally uses the listed query values.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePage, studentSearch, filterSemester, filterYear, studentPage]);
+  }, [activePage, studentSearch, filterSemester, filterYear, filterAcademicYear, studentPage]);
 
   async function loadClasses() {
   setClassesLoading(true);
@@ -307,12 +320,13 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
         body: JSON.stringify({
           ...electionForm,
           admission_year: Number(electionForm.admission_year),
+          academic_year: Number(electionForm.academic_year),
           semester: Number(electionForm.semester),
           duration_minutes: Number(electionForm.duration_minutes),
         }),
       }));
       setElectionMessage(data.message || "Election created as a draft.");
-      setElectionForm({ title: "", description: "", election_type: "CR", admission_year: "", semester: "", duration_minutes: "30" });
+      setElectionForm({ title: "", description: "", election_type: "CR", admission_year: "", academic_year: "", semester: "", duration_minutes: "30" });
       await loadHodElections();
     } catch (error) {
       setElectionError(error.message || "Could not create the election.");
@@ -450,6 +464,7 @@ window.setTimeout(() => {
         email: "",
         semester: "",
         admission_year: "",
+        academic_year: "",
       });
 
       await loadStudents();
@@ -493,9 +508,9 @@ window.setTimeout(() => {
   async function handleImport() {
   if (importing) return;
 
-  if (!importYear || !importSemester || !importFile) {
+  if (!importYear || !importAcademicYear || !importSemester || !importFile) {
     setImportMessage(
-      "Select an admission year, semester and Excel/CSV file."
+      "Select an admission year, academic year, semester and Excel/CSV file."
     );
     return;
   }
@@ -503,6 +518,7 @@ window.setTimeout(() => {
   const formData = new FormData();
   formData.append("file", importFile);
   formData.append("admission_year", importYear);
+  formData.append("academic_year", importAcademicYear);
   formData.append("semester", importSemester);
 
   setImporting(true);
@@ -558,7 +574,7 @@ async function handleConfirmImport() {
   }));
 
   const confirmed = window.confirm(
-    `Import ${validStudents.length} valid student(s) into ${importPreview.branch}, Semester ${importSemester}, Admission Year ${importYear}?`
+    `Import ${validStudents.length} valid student(s) into ${importPreview.branch}, Academic Year ${importAcademicYear}, Semester ${importSemester}, Admission Year ${importYear}?`
   );
 
   if (!confirmed) return;
@@ -579,6 +595,7 @@ async function handleConfirmImport() {
         body: JSON.stringify({
           students: validStudents,
           admission_year: Number(importYear),
+          academic_year: Number(importAcademicYear),
           semester: Number(importSemester),
         })
       }
@@ -1010,7 +1027,7 @@ window.setTimeout(() => {
                   <div>
                     <h3>Bulk Upload</h3>
                     <p>
-                      Select the admission year and semester, then
+                      Select the admission year, academic year and semester, then
                       choose your Excel or CSV file.
                     </p>
                   </div>
@@ -1030,6 +1047,21 @@ window.setTimeout(() => {
                         <option key={year} value={year}>
                           {year}
                         </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    Academic Year
+
+                    <select
+                      value={importAcademicYear}
+                      onChange={(event) => setImportAcademicYear(event.target.value)}
+                      required
+                    >
+                      <option value="">Select academic year</option>
+                      {admissionYears.map((year) => (
+                        <option key={year} value={year}>{year}</option>
                       ))}
                     </select>
                   </label>
@@ -1101,6 +1133,7 @@ window.setTimeout(() => {
     <p>
       Branch: {importPreview.branch} |
       Admission Year: {importPreview.admission_year} |
+      Academic Year: {importPreview.academic_year} |
       Semester: {importPreview.semester}
     </p>
 
@@ -1120,6 +1153,7 @@ window.setTimeout(() => {
       <th>Email</th>
       <th>Semester</th>
       <th>Admission Year</th>
+      <th>Academic Year</th>
     </tr>
   </thead>
 
@@ -1131,6 +1165,7 @@ window.setTimeout(() => {
         <td>{student.email}</td>
         <td>{importPreview.semester}</td>
         <td>{importPreview.admission_year}</td>
+        <td>{importPreview.academic_year}</td>
       </tr>
     ))}
   </tbody>
@@ -1150,6 +1185,7 @@ window.setTimeout(() => {
       <th>Email</th>
       <th>Semester</th>
       <th>Admission Year</th>
+      <th>Academic Year</th>
       <th>Validation Errors</th>
     </tr>
   </thead>
@@ -1163,6 +1199,7 @@ window.setTimeout(() => {
         <td>{student.email}</td>
         <td>{importPreview.semester}</td>
         <td>{importPreview.admission_year}</td>
+        <td>{importPreview.academic_year}</td>
         <td>{student.errors.join(", ")}</td>
       </tr>
     ))}
@@ -1190,7 +1227,7 @@ window.setTimeout(() => {
   <button
     type="button"
     className="hod-primary-button"
-    disabled={!importFile || !importSemester || importing}
+    disabled={!importFile || !importAcademicYear || !importSemester || importing}
     onClick={handleImport}
   >
     {importing ? "Validating..." : "Preview & Validate"}
@@ -1300,6 +1337,22 @@ window.setTimeout(() => {
                         ))}
                       </select>
                     </label>
+
+                    <label>
+                      Academic Year
+
+                      <select
+                        name="academic_year"
+                        value={studentForm.academic_year}
+                        onChange={updateStudentForm}
+                        required
+                      >
+                        <option value="">Select academic year</option>
+                        {admissionYears.map((year) => (
+                          <option key={year} value={year}>{year}</option>
+                        ))}
+                      </select>
+                    </label>
                   </div>
 
                   {studentError && (
@@ -1332,7 +1385,7 @@ window.setTimeout(() => {
                   <div>
                     <h3>Registered Student Management</h3>
                     <p>
-                      Filter students by admission year, semester
+                      Filter students by admission year, academic year, semester
                       or USN. Select records to manage them.
                     </p>
                   </div>
@@ -1355,6 +1408,23 @@ window.setTimeout(() => {
                         <option key={year} value={year}>
                           {year}
                         </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    Academic Year
+
+                    <select
+                      value={filterAcademicYear}
+                      onChange={(event) => {
+                        setFilterAcademicYear(event.target.value);
+                        setStudentPage(1);
+                      }}
+                    >
+                      <option value="">All Academic Years</option>
+                      {admissionYears.map((year) => (
+                        <option key={year} value={year}>{year}</option>
                       ))}
                     </select>
                   </label>
@@ -1469,6 +1539,7 @@ window.setTimeout(() => {
                           <th>Email</th>
                           <th>Semester</th>
                           <th>Admission Year</th>
+                          <th>Academic Year</th>
                           <th>Status</th>
                           <th>Action</th>
                         </tr>
@@ -1495,6 +1566,7 @@ window.setTimeout(() => {
                             <td>{student.email}</td>
                             <td>{student.semester}</td>
                             <td>{student.admission_year || "—"}</td>
+                            <td>{student.academic_year || "—"}</td>
 
                             <td>
                               <span
