@@ -1,0 +1,34 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Frontend dependencies
+node_modules/
+
+# Build files
+dist/
+build/
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# Local source snapshots; keep them out of commits and release archives.
+.backup/
+
+# Private browser cookies
+cookies.txt
+
+# Operating system files
+.DS_Store
+Thumbs.db
