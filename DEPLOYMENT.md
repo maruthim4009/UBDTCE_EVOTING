@@ -26,20 +26,22 @@ when the deployed API uses a different public URL.
 
 Back up PostgreSQL before applying any migration. Do not run `schema.sql` on
 an existing database: it is the initial schema and is not a production
-recreation command. Apply only the applicable additive migration files from
-the backend directory, one at a time, with PostgreSQL credentials supplied by
-the deployment environment:
+recreation command. The tracked migration command is intentionally separate
+from Flask startup and defaults to read-only status. From the backend
+directory, review the target and then explicitly confirm its exact PostgreSQL
+database name before applying pending versions:
 
 ```powershell
-psql -v ON_ERROR_STOP=1 -f voting_reliability_migration.sql
-psql -v ON_ERROR_STOP=1 -f email_management_migration.sql
-psql -v ON_ERROR_STOP=1 -f hod_management_migration.sql
-psql -v ON_ERROR_STOP=1 -f integrity_symbols_outbox_migration.sql
-psql -v ON_ERROR_STOP=1 -f performance_indexes_migration.sql
+..\.venv\Scripts\python.exe migrate.py
+..\.venv\Scripts\python.exe migrate.py --apply --confirm-database ubdtce_evoting
 ```
 
-Review each file and confirm the target database before execution. These
-migrations must be run once only on installations that need their objects.
+The ledger records the SQL checksum for each completed version and refuses a
+changed or unknown version. The final performance-index migration uses
+nonblocking `CREATE INDEX CONCURRENTLY`; the runner keeps autocommit enabled
+for that reason. Do not use `--apply` on a database whose migration history
+was previously managed by hand until a DBA has reviewed and initialized its
+ledger against the exact version files.
 
 ## Production API
 

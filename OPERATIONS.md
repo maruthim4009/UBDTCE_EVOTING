@@ -65,23 +65,25 @@ delivery by design.
 ## Required safe schema rollout
 
 Do not run `schema.sql` against an existing database. Confirm the target is an
-approved backup-tested environment, then run each additive migration once:
+approved backup-tested environment. The migration command is read-only unless
+`--apply` is paired with the exact target database name:
 
 ```powershell
 cd backend
-psql -v ON_ERROR_STOP=1 -f voting_reliability_migration.sql
-psql -v ON_ERROR_STOP=1 -f email_management_migration.sql
-psql -v ON_ERROR_STOP=1 -f hod_management_migration.sql
-psql -v ON_ERROR_STOP=1 -f integrity_symbols_outbox_migration.sql
-psql -v ON_ERROR_STOP=1 -f performance_indexes_migration.sql
+..\.venv\Scripts\python.exe migrate.py
+..\.venv\Scripts\python.exe migrate.py --apply --confirm-database ubdtce_evoting
 ```
 
-The integrity migration adds candidate symbols, versioned audit metadata, and
-outbox retry metadata. The performance-index migration uses nonblocking
-`CREATE INDEX CONCURRENTLY`, so it must run outside a transaction and can take
-substantial time on a large database. Neither migration deletes records or
-alters ballots. Take a protected `pg_dump`, verify its restoration elsewhere,
-and use a migration tracking process before production rollout.
+The command records a version and checksum after each completed migration,
+serializes concurrent invocations with a PostgreSQL advisory lock, and refuses
+to rerun a changed or unknown version. Its manifest includes the academic-year
+eligibility migration required by cohort-scoped elections. The integrity
+migration adds candidate symbols, versioned audit metadata, and outbox retry
+metadata. The performance-index migration uses nonblocking `CREATE INDEX
+CONCURRENTLY`, so it can take substantial time on a large database. Neither
+migration deletes records or alters ballots. Take a protected `pg_dump`,
+verify its restoration elsewhere, and do not use `--apply` for a
+previously-manual rollout until a DBA has initialized and reviewed the ledger.
 
 ## Local operation
 

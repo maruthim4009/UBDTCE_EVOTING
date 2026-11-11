@@ -6,11 +6,17 @@ database because they do not create, update, or query application records.
 """
 
 from pathlib import Path
+import sys
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 import smtplib
 import inspect
+
+# Make discovery from either the repository root or backend directory work.
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 
 from app import (
     app,
@@ -64,6 +70,15 @@ class AuthorizationAndBallotContractTests(unittest.TestCase):
         student = self.client.get("/api/student/dashboard")
         self.assertEqual(principal.status_code, 403)
         self.assertEqual(student.status_code, 403)
+
+    @patch.object(app.logger, "exception")
+    @patch("app.get_db_connection", side_effect=RuntimeError("database unavailable"))
+    def test_hod_database_outage_returns_a_json_service_error(self, _connection, logger):
+        self._set_session_role("HOD")
+        response = self.client.get("/api/hod/elections")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["status"], "error")
+        logger.assert_called_once()
 
     def test_principal_session_cannot_reach_hod_or_student_routes(self):
         self._set_session_role("PRINCIPAL")
@@ -184,6 +199,56 @@ class AuthorizationAndBallotContractTests(unittest.TestCase):
         source = inspect.getsource(import_hod_students_bulk)
         self.assertIn("SAVEPOINT", source)
         self.assertIn("psycopg.errors.UniqueViolation", source)
+
+    def test_election_forms_send_the_complete_academic_cohort(self):
+        root = Path(__file__).resolve().parents[2]
+        hod_dashboard = (root / "frontend" / "src" / "HODDashboard.jsx").read_text(
+            encoding="utf-8"
+        )
+        principal_app = (root / "frontend" / "src" / "App.jsx").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "Academic year<select value={electionForm.academic_year}",
+            hod_dashboard,
+        )
+        self.assertIn(
+            "academic_year: Number(electionForm.academic_year)", hod_dashboard
+        )
+        self.assertIn("presidentAcademicYear", principal_app)
+        self.assertIn(
+            "requestBody.academic_year = Number(presidentAcademicYear);",
+            principal_app,
+        )
+
+    def test_student_dashboard_keeps_available_sections_usable(self):
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "frontend"
+            / "src"
+            / "StudentDashboard.jsx"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Promise.allSettled", source)
+        self.assertIn("AbortController", source)
+
+    def test_migration_manifest_has_a_tracked_safe_order(self):
+        from migrate import MIGRATIONS, pending_migrations
+
+        versions = [migration.version for migration in MIGRATIONS]
+        self.assertEqual(
+            versions,
+            [
+                "001_voting_reliability",
+                "002_email_management",
+                "003_hod_management",
+                "004_academic_year_eligibility",
+                "005_integrity_symbols_outbox",
+                "006_performance_indexes",
+            ],
+        )
+        self.assertEqual(list(pending_migrations({})), list(MIGRATIONS))
+        with self.assertRaises(RuntimeError):
+            list(pending_migrations({"001_voting_reliability": "incorrect"}))
 
 
 if __name__ == "__main__":

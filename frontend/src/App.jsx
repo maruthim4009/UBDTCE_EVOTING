@@ -111,6 +111,7 @@ const [emailResendIn, setEmailResendIn] = useState(0);
   const [electionTitle, setElectionTitle] = useState("");
   const [electionDuration, setElectionDuration] = useState("30");
   const [presidentAdmissionYear, setPresidentAdmissionYear] = useState("");
+  const [presidentAcademicYear, setPresidentAcademicYear] = useState("");
   const [presidentSemester, setPresidentSemester] = useState("");
   const [selectedElectionBranches, setSelectedElectionBranches] = useState([]);
   const [electionMessage, setElectionMessage] = useState("");
@@ -1168,8 +1169,13 @@ useEffect(() => {
       setElectionMessageType("error");
       return;
     }
-    if (Boolean(presidentAdmissionYear) !== Boolean(presidentSemester)) {
-      setElectionMessage("Select both an admission year and semester, or leave the voter cohort unrestricted.");
+    const cohortValues = [
+      presidentAdmissionYear,
+      presidentAcademicYear,
+      presidentSemester,
+    ];
+    if (cohortValues.some(Boolean) && !cohortValues.every(Boolean)) {
+      setElectionMessage("Select admission year, academic year and semester together, or leave the voter cohort unrestricted.");
       setElectionMessageType("error");
       return;
     }
@@ -1180,8 +1186,9 @@ useEffect(() => {
         branch_ids: selectedElectionBranches,
         duration_minutes: Number(electionDuration),
       };
-      if (presidentAdmissionYear && presidentSemester) {
+      if (cohortValues.every(Boolean)) {
         requestBody.admission_year = Number(presidentAdmissionYear);
+        requestBody.academic_year = Number(presidentAcademicYear);
         requestBody.semester = Number(presidentSemester);
       }
       const response = await apiFetch(`${API_BASE}/principal/elections`, {
@@ -1196,6 +1203,7 @@ useEffect(() => {
       setElectionMessageType("success");
       setElectionTitle("");
       setPresidentAdmissionYear("");
+      setPresidentAcademicYear("");
       setPresidentSemester("");
       setSelectedElectionBranches([]);
       await Promise.all([refreshPrincipalDashboard(), loadPrincipalElections()]);
@@ -2554,11 +2562,23 @@ const registeredBranchCount = dashboardBranches.length;
                           <input
                             id="presidentAdmissionYear"
                             type="number"
-                            min="2026"
-                            max="2040"
+                            min="2000"
+                            max="2100"
                             value={presidentAdmissionYear}
                             onChange={(event) => setPresidentAdmissionYear(event.target.value)}
-                            placeholder="All CR cohorts"
+                            placeholder="All student cohorts"
+                          />
+                        </div>
+                        <div className="principal-election-field">
+                          <label htmlFor="presidentAcademicYear">Academic year (optional)</label>
+                          <input
+                            id="presidentAcademicYear"
+                            type="number"
+                            min="2000"
+                            max="2100"
+                            value={presidentAcademicYear}
+                            onChange={(event) => setPresidentAcademicYear(event.target.value)}
+                            placeholder="e.g. 2026"
                           />
                         </div>
                         <div className="principal-election-field">
@@ -2578,7 +2598,7 @@ const registeredBranchCount = dashboardBranches.length;
                         <div className="principal-election-departments-heading">
                           <div>
                             <h3>Participating departments</h3>
-                            <p>Select the branches whose eligible representatives can participate.</p>
+                            <p>Select the branches whose active students can participate.</p>
                           </div>
                           {activeElectionBranches.length > 0 && (
                             <div className="principal-election-selection-actions">
@@ -2641,7 +2661,7 @@ const registeredBranchCount = dashboardBranches.length;
                       )}
 
                       <div className="principal-election-form-footer">
-                        <p>Voting duration: <strong>{Number(electionDuration) < 60 ? `${electionDuration} minutes` : Number(electionDuration) === 1440 ? "24 hours" : Number(electionDuration) % 60 === 0 ? `${Number(electionDuration) / 60} hours` : `${electionDuration} minutes`}</strong>. Voters are restricted to selected-branch CRs{presidentAdmissionYear && presidentSemester ? ` in ${presidentAdmissionYear}, semester ${presidentSemester}` : ""}.</p>
+                        <p>Voting duration: <strong>{Number(electionDuration) < 60 ? `${electionDuration} minutes` : Number(electionDuration) === 1440 ? "24 hours" : Number(electionDuration) % 60 === 0 ? `${Number(electionDuration) / 60} hours` : `${electionDuration} minutes`}</strong>. Voters are restricted to active students in the selected branches{presidentAdmissionYear && presidentAcademicYear && presidentSemester ? ` in admission year ${presidentAdmissionYear}, academic year ${presidentAcademicYear}, semester ${presidentSemester}` : ""}. Presidential candidates must be verified CR election winners.</p>
                         <button
                           type="submit"
                           className="principal-primary-button"

@@ -52,33 +52,69 @@ export default function StudentDashboard({ currentUser, onLogout }) {
   ];
   const activeItem = menuItems.find((item) => item.id === activePage);
 
-  async function loadDashboard() {
+  async function loadDashboard(signal) {
     setLoading(true);
     setError("");
     try {
-      const [dashboard, electionData, historyData] = await Promise.all([
-        apiFetch("/student/dashboard"),
-        apiFetch("/student/elections"),
-        apiFetch("/student/voting-history"),
+      // Each section is independently useful. A temporary history failure
+      // must not hide an open election or prevent voting.
+      const [dashboardResult, electionsResult, historyResult] = await Promise.allSettled([
+        apiFetch("/student/dashboard", { signal }),
+        apiFetch("/student/elections", { signal }),
+        apiFetch("/student/voting-history", { signal }),
       ]);
-      setProfile(dashboard.profile || null);
-      setStatistics(dashboard.statistics || null);
-      setElections(Array.isArray(electionData.elections) ? electionData.elections : []);
-      setHistory(Array.isArray(historyData.history) ? historyData.history : []);
-    } catch (requestError) {
-      setError(requestError.message || "Could not load your election information.");
+
+      if (signal?.aborted) return;
+
+      const unavailableSections = [];
+      if (dashboardResult.status === "fulfilled") {
+        setProfile(dashboardResult.value.profile || null);
+        setStatistics(dashboardResult.value.statistics || null);
+      } else {
+        unavailableSections.push("profile and statistics");
+      }
+      if (electionsResult.status === "fulfilled") {
+        setElections(
+          Array.isArray(electionsResult.value.elections)
+            ? electionsResult.value.elections
+            : []
+        );
+      } else {
+        unavailableSections.push("elections");
+      }
+      if (historyResult.status === "fulfilled") {
+        setHistory(
+          Array.isArray(historyResult.value.history)
+            ? historyResult.value.history
+            : []
+        );
+      } else {
+        unavailableSections.push("voting history");
+      }
+
+      if (unavailableSections.length) {
+        setError(
+          `Some information could not be loaded (${unavailableSections.join(
+            ", "
+          )}). Available sections are still usable.`
+        );
+      }
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   }
 
   useEffect(() => {
-    // Schedule the first request after mount to avoid a synchronous effect
-    // update while retaining a single source of truth in loadDashboard.
+    const controller = new AbortController();
+    // Defer the request so the effect itself remains a subscription setup,
+    // while cleanup still aborts a request that outlives this dashboard.
     const requestId = window.setTimeout(() => {
-      void loadDashboard();
+      void loadDashboard(controller.signal);
     }, 0);
-    return () => window.clearTimeout(requestId);
+    return () => {
+      window.clearTimeout(requestId);
+      controller.abort();
+    };
     // loadDashboard is intentionally run once for this authenticated view.
   }, []);
 

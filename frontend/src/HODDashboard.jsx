@@ -1657,7 +1657,7 @@ window.setTimeout(() => {
 
     <div className="hod-classes-toolbar">
   <p>
-    Select admission year and semester to view the corresponding class.
+    Select admission year, academic year and semester to view the corresponding class.
   </p>
 
   <div className="hod-class-filters">
@@ -1671,6 +1671,25 @@ window.setTimeout(() => {
         }
       >
         <option value="">Select admission year</option>
+
+        {admissionYears.map((year) => (
+          <option key={year} value={year}>
+            {year}
+          </option>
+        ))}
+      </select>
+    </label>
+
+    <label>
+      Academic Year
+
+      <select
+        value={classAcademicYearFilter}
+        onChange={(event) =>
+          setClassAcademicYearFilter(event.target.value)
+        }
+      >
+        <option value="">Select academic year</option>
 
         {admissionYears.map((year) => (
           <option key={year} value={year}>
@@ -1712,9 +1731,9 @@ window.setTimeout(() => {
       <div className="hod-student-empty">
         Loading classes from database...
       </div>
-   ) : !classYearFilter && !classSemesterFilter ? (
+   ) : !classYearFilter || !classAcademicYearFilter || !classSemesterFilter ? (
   <div className="hod-student-empty">
-    Select an admission year and semester to view classes.
+    Select an admission year, academic year and semester to view classes.
   </div>
 ) : filteredClasses.length === 0 ? (
       <div className="hod-student-empty">
@@ -1731,11 +1750,12 @@ window.setTimeout(() => {
             
             <article
   className="hod-class-card"
-  key={`${classItem.admission_year}-${classItem.semester}`}
+  key={`${classItem.admission_year}-${classItem.academic_year}-${classItem.semester}`}
   role="button"
   tabIndex={0}
   onClick={() => {
     setFilterYear(String(classItem.admission_year));
+    setFilterAcademicYear(String(classItem.academic_year));
     setFilterSemester(String(classItem.semester));
     setActivePage("students");
     setSidebarOpen(false);
@@ -1811,6 +1831,7 @@ window.setTimeout(() => {
           <div className="hod-election-form-grid">
             <label>Representative type<select value={electionForm.election_type} onChange={(event) => setElectionForm((previous) => ({ ...previous, election_type: event.target.value }))}><option value="CR">Class Representative</option><option value="FR">Faculty Representative</option></select></label>
             <label>Admission year<select value={electionForm.admission_year} onChange={(event) => setElectionForm((previous) => ({ ...previous, admission_year: event.target.value }))} required><option value="">Select year</option>{admissionYears.map((year) => <option key={year} value={year}>{year}</option>)}</select></label>
+            <label>Academic year<select value={electionForm.academic_year} onChange={(event) => setElectionForm((previous) => ({ ...previous, academic_year: event.target.value }))} required><option value="">Select year</option>{admissionYears.map((year) => <option key={year} value={year}>{year}</option>)}</select></label>
             <label>Semester<select value={electionForm.semester} onChange={(event) => setElectionForm((previous) => ({ ...previous, semester: event.target.value }))} required><option value="">Select semester</option>{semesters.map((semester) => <option key={semester} value={semester}>Semester {semester}</option>)}</select></label>
             <label>Voting minutes<input type="number" min="1" max="10080" value={electionForm.duration_minutes} onChange={(event) => setElectionForm((previous) => ({ ...previous, duration_minutes: event.target.value }))} required /></label>
           </div>

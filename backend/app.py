@@ -262,26 +262,34 @@ def require_hod():
             "message": "HOD access is required."
         }), 403
 
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT 1
-                FROM accounts a
-                JOIN hod_assignments h
-                    ON h.account_id = a.id
-                JOIN branches b
-                    ON b.id = h.branch_id
-                WHERE a.id = %s
-                  AND a.role = 'HOD'
-                  AND a.is_active = TRUE
-                  AND b.is_active = TRUE;
-            """, (session["account_id"],))
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 1
+                    FROM accounts a
+                    JOIN hod_assignments h
+                        ON h.account_id = a.id
+                    JOIN branches b
+                        ON b.id = h.branch_id
+                    WHERE a.id = %s
+                      AND a.role = 'HOD'
+                      AND a.is_active = TRUE
+                      AND b.is_active = TRUE;
+                """, (session["account_id"],))
 
-            if not cur.fetchone():
-                return jsonify({
-                    "status": "error",
-                    "message": "Your HOD account has no active department assignment."
-                }), 403
+                if not cur.fetchone():
+                    session.clear()
+                    return jsonify({
+                        "status": "error",
+                        "message": "Your HOD account has no active department assignment."
+                    }), 403
+    except Exception:
+        app.logger.exception("HOD session validation failed")
+        return jsonify({
+            "status": "error",
+            "message": "HOD access is temporarily unavailable."
+        }), 503
 
     return None
 
