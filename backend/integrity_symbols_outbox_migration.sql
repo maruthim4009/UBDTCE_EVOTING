@@ -49,6 +49,16 @@ ALTER TABLE student_activation_email_jobs
         'TEMPORARY', 'TEMPORARY_EXHAUSTED', 'PERMANENT'
     )) NOT VALID;
 
+-- An invitation that is no longer necessary (because the student activated
+-- through a valid link or OTP first) must not remain misleadingly PENDING.
+ALTER TABLE student_activation_email_jobs
+    DROP CONSTRAINT IF EXISTS student_activation_email_jobs_status_check;
+
+ALTER TABLE student_activation_email_jobs
+    ADD CONSTRAINT student_activation_email_jobs_status_check
+    CHECK (status IN ('PENDING', 'PROCESSING', 'SENT', 'FAILED', 'CANCELLED'))
+    NOT VALID;
+
 CREATE INDEX IF NOT EXISTS idx_student_activation_email_jobs_ready
     ON student_activation_email_jobs (status, next_attempt_at, created_at)
     WHERE status = 'PENDING';

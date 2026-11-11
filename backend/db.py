@@ -1,10 +1,13 @@
 
 import os
+from pathlib import Path
 
 import psycopg
 from dotenv import load_dotenv
 
-load_dotenv()
+# The project keeps its private environment file at the repository root.
+# Explicit host environment variables remain higher priority than this file.
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 
 def get_db_connection():

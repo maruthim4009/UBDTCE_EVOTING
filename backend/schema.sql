@@ -235,7 +235,7 @@ CREATE TABLE student_activation_email_jobs (
     account_id BIGINT NOT NULL UNIQUE
         REFERENCES accounts(id) ON DELETE CASCADE,
     status VARCHAR(12) NOT NULL DEFAULT 'PENDING'
-        CHECK (status IN ('PENDING', 'PROCESSING', 'SENT', 'FAILED')),
+        CHECK (status IN ('PENDING', 'PROCESSING', 'SENT', 'FAILED', 'CANCELLED')),
     attempts SMALLINT NOT NULL DEFAULT 0
         CHECK (attempts BETWEEN 0 AND 100),
     last_attempt_at TIMESTAMPTZ,

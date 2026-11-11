@@ -8,7 +8,9 @@ import hmac
 import json
 from datetime import timedelta, timezone
 from email.message import EmailMessage
+from email.utils import formataddr, formatdate, make_msgid
 from html import escape
+from pathlib import Path
 from urllib.parse import urlencode
 import csv
 import io
@@ -26,7 +28,10 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from db import get_db_connection
 
-load_dotenv()
+# Keep configuration discovery stable whether the API is started from the
+# repository root, backend directory, a Windows service, or a test runner.
+# Environment variables supplied by the host still take precedence.
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 app = Flask(__name__)
 
@@ -155,6 +160,11 @@ def add_security_response_headers(response):
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("X-Request-ID", getattr(g, "request_id", ""))
+    if request.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+        response.headers.setdefault(
+            "Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"
+        )
     return response
 
 
@@ -171,6 +181,14 @@ def enforce_api_csrf_header():
         }), 403
 
     origin = request.headers.get("Origin")
+    if (
+        os.getenv("APP_ENV", "development").strip().lower() == "production"
+        and not origin
+    ):
+        return jsonify({
+            "status": "error",
+            "message": "A verified request origin is required.",
+        }), 403
     if origin and origin.rstrip("/") not in CORS_ORIGINS:
         return jsonify({
             "status": "error",
@@ -502,6 +520,24 @@ def _smtp_port():
     return port
 
 
+def configured_sender_address():
+    """Return the verified envelope/header sender configured for this service."""
+    return os.getenv("SMTP_FROM_EMAIL", os.getenv("SMTP_EMAIL", "")).strip()
+
+
+def set_message_identity_headers(message):
+    """Add ordinary RFC mail identity headers without exposing configuration."""
+    sender = configured_sender_address()
+    # The fallback is used only while rendering/mocking messages. deliver_email
+    # rejects a missing or invalid configured sender before any network call.
+    if not valid_email_address(sender):
+        sender = "no-reply@ubdtce.invalid"
+    message["From"] = formataddr(("UBDTCE Secure E-Voting", sender))
+    message["Reply-To"] = sender
+    message["Date"] = formatdate(localtime=False)
+    message["Message-ID"] = make_msgid("ubdtce", domain=sender.rsplit("@", 1)[-1])
+
+
 def deliver_email(message):
     """Deliver one message, or deliberately suppress it in safe test mode.
 
@@ -517,10 +553,12 @@ def deliver_email(message):
     smtp_password = os.getenv("SMTP_APP_PASSWORD")
     smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
     smtp_username = os.getenv("SMTP_USERNAME", smtp_email or "").strip()
+    smtp_from_email = configured_sender_address()
 
     if (
         not smtp_email
         or not valid_email_address(smtp_email)
+        or not valid_email_address(smtp_from_email)
         or not smtp_password
         or not smtp_host
         or not smtp_username
@@ -556,24 +594,92 @@ def deliver_email(message):
 
 def is_retryable_email_failure(exc):
     """Classify SMTP failures without retaining provider details in the outbox."""
-    if isinstance(exc, (TimeoutError, OSError, smtplib.SMTPServerDisconnected)):
-        return True
     if isinstance(exc, smtplib.SMTPResponseException):
         return 400 <= exc.smtp_code < 500
     if isinstance(exc, smtplib.SMTPRecipientsRefused):
         response_codes = [details[0] for details in exc.recipients.values()]
         return bool(response_codes) and all(400 <= code < 500 for code in response_codes)
+    # SMTPResponseException inherits from OSError on supported Python versions,
+    # so response-code classification must happen before the generic network
+    # failure branch. A 5xx recipient rejection is permanent, not retryable.
+    if isinstance(exc, (TimeoutError, OSError, smtplib.SMTPServerDisconnected)):
+        return True
     return False
 
 
-def send_reset_email(email, token, account_role):
-    """Send a one-time password reset link through Gmail SMTP."""
-    smtp_email = os.getenv("SMTP_EMAIL")
+def build_branded_email(
+    subject,
+    recipient,
+    heading,
+    eyebrow,
+    plain_body,
+    html_body,
+    *,
+    action_label=None,
+    action_url=None,
+    expires_text=None,
+):
+    """Create the common responsive UBDTCE email shell.
 
+    Callers provide only escaped display fragments and an opaque URL where
+    appropriate. This helper intentionally does not log a recipient, token,
+    URL, or message body.
+    """
     message = EmailMessage()
-    message["Subject"] = "Reset your UBDTCE E-Voting password"
-    message["From"] = f"UBDTCE E-Voting <{smtp_email}>"
-    message["To"] = email
+    message["Subject"] = subject
+    set_message_identity_headers(message)
+    message["To"] = recipient
+    message.set_content(
+        "UBDTCE SECURE E-VOTING SYSTEM\n\n"
+        f"{heading}\n\n{plain_body}\n\n"
+        "Security notice: Never share a password, verification code, or secure link.\n"
+        "UBDTCE Secure E-Voting Team"
+    )
+
+    action_markup = ""
+    if action_label and action_url:
+        action_markup = (
+            '<p style="margin:28px 0;text-align:center">'
+            f'<a href="{escape(action_url, quote=True)}" '
+            'style="display:inline-block;background:#142d4e;border:1px solid #d7b66d;'
+            'border-radius:7px;color:#ffffff;font-size:14px;font-weight:700;'
+            'padding:13px 24px;text-decoration:none">'
+            f"{escape(action_label)}</a></p>"
+        )
+    expiry_markup = (
+        f'<p style="color:#475569;font-size:13px;line-height:1.7">{escape(expires_text)}</p>'
+        if expires_text else ""
+    )
+    message.add_alternative(
+        "<!doctype html><html lang=\"en\"><head>"
+        "<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        f"<title>{escape(heading)}</title></head>"
+        "<body style=\"margin:0;padding:24px 12px;background:#f1f4f8;font-family:Arial,Helvetica,sans-serif;color:#263449\">"
+        "<table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr><td align=\"center\">"
+        "<table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" "
+        "style=\"max-width:560px;background:#ffffff;border-radius:12px;overflow:hidden\">"
+        "<tr><td align=\"center\" style=\"background:#142d4e;padding:28px 20px\">"
+        "<div style=\"display:inline-block;width:42px;height:42px;line-height:42px;background:#d7b66d;"
+        "border-radius:8px;color:#142d4e;font-size:23px;font-weight:700\">U</div>"
+        "<h1 style=\"margin:12px 0 5px;color:#ffffff;font-size:23px;letter-spacing:1px\">UBDTCE</h1>"
+        "<p style=\"margin:0;color:#e4cc91;font-size:11px;letter-spacing:1.8px\">SECURE E-VOTING SYSTEM</p>"
+        "</td></tr><tr><td style=\"padding:30px 26px\">"
+        f"<p style=\"margin:0 0 8px;color:#9a722b;font-size:11px;font-weight:700;letter-spacing:1.4px\">{escape(eyebrow)}</p>"
+        f"<h2 style=\"margin:0 0 16px;color:#142d4e;font-size:24px;line-height:1.3\">{escape(heading)}</h2>"
+        f"{html_body}{action_markup}{expiry_markup}"
+        "<div style=\"background:#fff8e8;border-left:3px solid #c6a45b;margin-top:22px;padding:12px 14px\">"
+        "<p style=\"margin:0;color:#66552f;font-size:12px;line-height:1.7\"><strong>Security notice:</strong> "
+        "Never share a password, verification code, or secure link. If you did not expect this message, contact the college administration.</p>"
+        "</div></td></tr><tr><td align=\"center\" style=\"background:#f8fafc;border-top:1px solid #e2e8f0;padding:17px\">"
+        "<p style=\"margin:0;color:#64748b;font-size:11px;line-height:1.6\">Automated security notification. Please do not reply.<br>UBDTCE Secure E-Voting System</p>"
+        "</td></tr></table></td></tr></table></body></html>",
+        subtype="html",
+    )
+    return message
+
+
+def send_reset_email(email, token, account_role):
+    """Send a one-time password recovery email in the shared brand style."""
 
     if account_role == "HOD":
         role_slug = "hod"
@@ -592,27 +698,21 @@ def send_reset_email(email, token, account_role):
     f"{urlencode({'token': token, 'role': role_slug})}"
     )
 
-    message.set_content(
-        "A password reset was requested for your UBDTCE E-Voting account.\n\n"
-        f"Use this link within {RESET_TOKEN_MINUTES} minutes:\n"
-        f"{reset_link}\n\n"
-        "If you did not request this, ignore this email."
+    message = build_branded_email(
+        "Reset your UBDTCE E-Voting password",
+        email,
+        "Reset your password",
+        "ACCOUNT SECURITY",
+        (
+            "A password reset was requested for your UBDTCE Secure E-Voting account.\n\n"
+            f"Use this one-time link within {RESET_TOKEN_MINUTES} minutes:\n{reset_link}\n\n"
+            "If you did not request this reset, you can safely ignore this email."
+        ),
+        "<p style=\"font-size:15px;line-height:1.8;color:#475569\">A password reset was requested for your account. Use the secure one-time button below to choose a new password.</p>",
+        action_label="Set a new password",
+        action_url=reset_link,
+        expires_text=f"This one-time link expires in {RESET_TOKEN_MINUTES} minutes.",
     )
-    message.add_alternative(
-        "<!doctype html>"
-        "<html><body style='font-family:Arial,sans-serif;color:#23213A'>"
-        "<h2>Reset your UBDTCE E-Voting password</h2>"
-        "<p>A password reset was requested for your account.</p>"
-        f"<p><a href=\"{escape(reset_link, quote=True)}\" "
-        "style='display:inline-block;padding:12px 20px;background:#142d4e;"
-        "color:#ffffff;text-decoration:none;border:1px solid #d7b66d;border-radius:6px'>"
-        "Set a new password</a></p>"
-        f"<p>This one-time link expires in {RESET_TOKEN_MINUTES} minutes.</p>"
-        "<p>If you did not request this, ignore this email.</p>"
-        "</body></html>",
-        subtype="html",
-    )
-
     deliver_email(message)
 
 
@@ -620,53 +720,35 @@ def send_reset_email(email, token, account_role):
 
 def send_hod_setup_email(email, token, hod_name, branch_name):
     """Send the one-time invitation that lets a newly assigned HOD create a password."""
-    smtp_email = os.getenv("SMTP_EMAIL")
-
     setup_link = f"{RESET_URL}?{urlencode({'token': token, 'role': 'hod', 'setup': '1'})}"
     safe_name = escape(hod_name)
     safe_branch = escape(branch_name)
-
-    message = EmailMessage()
-    message["Subject"] = "Create your UBDTCE HOD account password"
-    message["From"] = f"UBDTCE Secure E-Voting <{smtp_email}>"
-    message["To"] = email
-    message.set_content(
-        f"Hello {hod_name},\n\n"
-        f"The Principal has assigned you as the HOD for {branch_name}.\n"
-        "Use the one-time link below to create your own password.\n\n"
-        f"{setup_link}\n\n"
-        f"This link expires in {HOD_SETUP_TOKEN_HOURS} hours and can be used only once.\n"
-        "If you were not expecting this invitation, contact the college administration."
+    message = build_branded_email(
+        "Create your UBDTCE HOD account password",
+        email,
+        "Welcome to UBDTCE Secure E-Voting",
+        "HOD ACCOUNT INVITATION",
+        (
+            f"Hello {hod_name},\n\nThe Principal has assigned you as the HOD for {branch_name}.\n\n"
+            f"Create your password with this one-time link:\n{setup_link}\n\n"
+            "If you were not expecting this invitation, contact the college administration."
+        ),
+        f"<p style=\"font-size:15px;line-height:1.8;color:#475569\">Hello {safe_name},</p>"
+        f"<p style=\"font-size:15px;line-height:1.8;color:#475569\">The Principal has assigned you as the HOD for <strong>{safe_branch}</strong>. Create your own account password to begin.</p>",
+        action_label="Create HOD password",
+        action_url=setup_link,
+        expires_text=f"This link expires in {HOD_SETUP_TOKEN_HOURS} hours and can be used only once.",
     )
-    message.add_alternative(
-        "<!doctype html><html><body style='font-family:Arial,sans-serif;color:#23213A'>"
-        "<h2>Welcome to UBDTCE Secure E-Voting</h2>"
-        f"<p>Hello {safe_name},</p>"
-        f"<p>The Principal has assigned you as the HOD for <strong>{safe_branch}</strong>.</p>"
-        "<p>Create your own account password using the secure one-time button below.</p>"
-        f'<p><a href="{escape(setup_link, quote=True)}" '
-        "style='display:inline-block;padding:12px 20px;background:#142d4e;color:#fff;"
-        "border:1px solid #d7b66d;text-decoration:none;border-radius:6px'>Create HOD Password</a></p>"
-        f"<p>This link expires in {HOD_SETUP_TOKEN_HOURS} hours and can be used only once.</p>"
-        "<p>If you were not expecting this invitation, contact the college administration.</p>"
-        "</body></html>",
-        subtype="html",
-    )
-
     deliver_email(message)
 
 
 def send_email_verification_otp(email, otp):
     """Send a professional HTML email containing the verification OTP."""
-    smtp_email = os.getenv("SMTP_EMAIL")
-
     message = EmailMessage()
     message["Subject"] = (
         "Your Email Verification Code | UBDTCE Secure E-Voting"
     )
-    message["From"] = (
-        f"UBDTCE Secure E-Voting <{smtp_email}>"
-    )
+    set_message_identity_headers(message)
     message["To"] = email
 
     # Plain-text fallback for email clients that do not support HTML.
@@ -1100,6 +1182,19 @@ def complete_student_activation():
                       AND used_at IS NULL;
                 """, (token_id,))
 
+                # A student may activate before a queued invitation is
+                # claimed (for example after an authorized resend). Do not
+                # leave that unsent job misleadingly PENDING forever.
+                cur.execute("""
+                    UPDATE student_activation_email_jobs
+                    SET status = 'CANCELLED', locked_at = NULL,
+                        next_attempt_at = NULL,
+                        last_error = 'Invitation no longer needed; account activated.',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE account_id = %s
+                      AND status IN ('PENDING', 'PROCESSING');
+                """, (account_id,))
+
                 # Record account activation in the audit chain.
                 write_audit_event(
                     cur,
@@ -1318,6 +1413,20 @@ def verify_student_activation_otp():
                         "message": "This student account is already activated."
                     }), 409
 
+                cur.execute("""
+                    UPDATE student_activation_email_jobs
+                    SET status = 'CANCELLED', locked_at = NULL,
+                        next_attempt_at = NULL,
+                        last_error = 'Invitation no longer needed; account activated.',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE account_id = %s
+                      AND status IN ('PENDING', 'PROCESSING');
+                """, (account_id,))
+                write_audit_event(cur, "STUDENT_ACCOUNT_ACTIVATED", {
+                    "account_id": account_id,
+                    "activation_method": "EMAIL_OTP",
+                })
+
         return jsonify({
             "status": "ok",
             "message": (
@@ -1384,8 +1493,6 @@ def create_student_activation_token(cur, account_id):
 def send_student_activation_email(email, student_name, usn, token):
     """Send a professional student account activation invitation."""
 
-    smtp_email = os.getenv("SMTP_EMAIL")
-
     activation_link = (
         f"{STUDENT_ACTIVATION_URL}"
         f"?{urlencode({'token': token})}"
@@ -1400,9 +1507,7 @@ def send_student_activation_email(email, student_name, usn, token):
     message["Subject"] = (
         "Activate Your Student Account | UBDTCE Secure E-Voting"
     )
-    message["From"] = (
-        f"UBDTCE Secure E-Voting <{smtp_email}>"
-    )
+    set_message_identity_headers(message)
     message["To"] = email
 
     message.set_content(
@@ -1573,6 +1678,34 @@ def process_pending_activation_emails(limit=25):
         raise ValueError("limit must be between 1 and 500")
 
     summary = {"attempted": 0, "sent": 0, "failed": 0, "skipped": 0}
+    # A worker can be terminated after claiming a job. Expired leases below
+    # the retry ceiling are reclaimed below; exhausted leases are stopped here
+    # rather than silently producing an unbounded series of replacement links.
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE student_activation_email_jobs
+                    SET status = 'FAILED', locked_at = NULL,
+                        next_attempt_at = NULL,
+                        failure_kind = 'TEMPORARY_EXHAUSTED',
+                        last_error = 'Delivery attempts exhausted; manual retry is required.',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE attempts >= %s
+                      AND (
+                          status = 'PENDING'
+                          OR (
+                              status = 'PROCESSING'
+                              AND locked_at < CURRENT_TIMESTAMP
+                                  - (%s * INTERVAL '1 minute')
+                          )
+                      );
+                """, (ACTIVATION_EMAIL_MAX_ATTEMPTS, ACTIVATION_EMAIL_JOB_LEASE_MINUTES))
+                summary["skipped"] = cur.rowcount
+    except Exception:
+        app.logger.exception("Could not recover exhausted activation email jobs")
+        return summary
+
     for _ in range(limit):
         claimed = None
         try:
@@ -1596,10 +1729,14 @@ def process_pending_activation_emails(limit=25):
                           AND a.role = 'STUDENT'
                           AND a.is_active = TRUE
                           AND c.account_id IS NULL
+                          AND j.attempts < %s
                         ORDER BY j.created_at, j.id
                         FOR UPDATE OF j SKIP LOCKED
                         LIMIT 1;
-                    """, (ACTIVATION_EMAIL_JOB_LEASE_MINUTES,))
+                    """, (
+                        ACTIVATION_EMAIL_JOB_LEASE_MINUTES,
+                        ACTIVATION_EMAIL_MAX_ATTEMPTS,
+                    ))
                     job = cur.fetchone()
                     if not job:
                         break
@@ -1726,14 +1863,12 @@ def health():
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT current_database(), current_timestamp;"
-                )
-                database, server_time = cur.fetchone()
+                cur.execute("SELECT current_timestamp;")
+                server_time = cur.fetchone()[0]
 
         return jsonify({
             "status": "ok",
-            "database": database,
+            "database": "connected",
             "database_time": server_time.isoformat(),
         }), 200
 
@@ -3522,6 +3657,7 @@ def create_principal_election():
     branch_ids = data.get("branch_ids")
     duration = data.get("duration_minutes")
     admission_year = data.get("admission_year")
+    academic_year = data.get("academic_year")
     semester = data.get("semester")
 
     if not isinstance(title, str) or not title.strip() or len(title.strip()) > 200:
@@ -3533,14 +3669,19 @@ def create_principal_election():
     branch_ids = sorted(set(branch_ids))
     if not isinstance(duration, int) or not 1 <= duration <= 10080:
         return jsonify({"status": "error", "message": "Voting duration must be between 1 and 10080 minutes."}), 400
-    if (admission_year is None) != (semester is None):
+    cohort_values = (admission_year, academic_year, semester)
+    if any(value is not None for value in cohort_values) and not all(
+        value is not None for value in cohort_values
+    ):
         return jsonify({
             "status": "error",
-            "message": "Select both admission year and semester, or leave both unrestricted.",
+            "message": "Select admission year, academic year, and semester together, or leave the voter cohort unrestricted.",
         }), 400
     if admission_year is not None:
         if not valid_admission_year(admission_year):
             return jsonify({"status": "error", "message": "Invalid admission year."}), 400
+        if not valid_admission_year(academic_year):
+            return jsonify({"status": "error", "message": "Invalid academic year."}), 400
         if type(semester) is not int or not 1 <= semester <= 12:
             return jsonify({"status": "error", "message": "Invalid semester."}), 400
 
@@ -3561,21 +3702,25 @@ def create_principal_election():
                     JOIN accounts a ON a.id = s.account_id
                     WHERE s.branch_id = ANY(%s)
                       AND (%s::smallint IS NULL OR s.admission_year = %s)
+                      AND (%s::smallint IS NULL OR s.academic_year = %s)
                       AND (%s::smallint IS NULL OR s.semester = %s)
                       AND a.role = 'STUDENT'
                       AND a.is_active = TRUE;
-                """, (branch_ids, admission_year, admission_year, semester, semester))
+                """, (
+                    branch_ids, admission_year, admission_year,
+                    academic_year, academic_year, semester, semester,
+                ))
                 eligible_count = cur.fetchone()[0]
                 if eligible_count == 0:
                     return jsonify({"status": "error", "message": "No active students match the selected branches and academic cohort."}), 409
 
                 cur.execute("""
                     INSERT INTO elections (
-                        title, description, election_type, branch_id, admission_year, semester,
+                        title, description, election_type, branch_id, admission_year, academic_year, semester,
                         duration_minutes, opens_at, closes_at, status, created_by
                     )
                     VALUES (
-                        %s, %s, 'PRESIDENT', NULL, %s, %s,
+                        %s, %s, 'PRESIDENT', NULL, %s, %s, %s,
                         %s,
                         CURRENT_TIMESTAMP,
                         CURRENT_TIMESTAMP + (%s * INTERVAL '1 minute'),
@@ -3586,6 +3731,7 @@ def create_principal_election():
                     title.strip(),
                     description.strip(),
                     admission_year,
+                    academic_year,
                     semester,
                     duration,
                     duration,
@@ -3606,12 +3752,13 @@ def create_principal_election():
                     JOIN accounts a ON a.id = s.account_id
                     WHERE s.branch_id = ANY(%s)
                       AND (%s::smallint IS NULL OR s.admission_year = %s)
+                      AND (%s::smallint IS NULL OR s.academic_year = %s)
                       AND (%s::smallint IS NULL OR s.semester = %s)
                       AND a.role = 'STUDENT'
                       AND a.is_active = TRUE;
                 """, (
                     election[0], branch_ids, admission_year, admission_year,
-                    semester, semester,
+                    academic_year, academic_year, semester, semester,
                 ))
                 inserted_eligible_count = cur.rowcount
                 if inserted_eligible_count != eligible_count:
@@ -3625,6 +3772,7 @@ def create_principal_election():
                     "election_type": "PRESIDENT",
                     "branch_ids": branch_ids,
                     "admission_year": admission_year,
+                    "academic_year": academic_year,
                     "semester": semester,
                     "duration_minutes": duration,
                     "eligible_voters": eligible_count,
@@ -3642,6 +3790,7 @@ def create_principal_election():
                 "closes_at": election[3].isoformat(),
                 "eligible_voters": eligible_count,
                 "admission_year": admission_year,
+                "academic_year": academic_year,
                 "semester": semester,
                 "status": "DRAFT",
             },
@@ -3656,7 +3805,7 @@ def _principal_college_election(cur, election_id, lock=False):
     lock_clause = " FOR UPDATE OF e" if lock else ""
     cur.execute(f"""
         SELECT e.id, e.title, e.description, e.election_type, e.status,
-               e.opens_at, e.closes_at, e.duration_minutes, e.admission_year, e.semester,
+               e.opens_at, e.closes_at, e.duration_minutes, e.admission_year, e.academic_year, e.semester,
                (SELECT COUNT(*) FROM voter_eligibility ve
                 WHERE ve.election_id = e.id) AS eligible_voters,
                (SELECT COUNT(*) FROM voter_participation vp
@@ -3687,11 +3836,12 @@ def _principal_college_election_payload(row):
         "closes_at": _isoformat(row[6]),
         "duration_minutes": row[7],
         "admission_year": row[8],
-        "semester": row[9],
-        "eligible_voters": row[10],
-        "participation_count": row[11],
-        "candidate_count": row[12],
-        "approved_candidate_count": row[13],
+        "academic_year": row[9],
+        "semester": row[10],
+        "eligible_voters": row[11],
+        "participation_count": row[12],
+        "candidate_count": row[13],
+        "approved_candidate_count": row[14],
     }
 
 
@@ -3708,7 +3858,7 @@ def list_principal_elections():
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT e.id, e.title, e.description, e.election_type, e.status,
-                           e.opens_at, e.closes_at, e.duration_minutes, e.admission_year, e.semester,
+                           e.opens_at, e.closes_at, e.duration_minutes, e.admission_year, e.academic_year, e.semester,
                            (SELECT COUNT(*) FROM voter_eligibility ve
                             WHERE ve.election_id = e.id),
                            (SELECT COUNT(*) FROM voter_participation vp
@@ -3805,10 +3955,18 @@ def _principal_eligible_candidate(cur, election_id, usn):
         JOIN branches b ON b.id = s.branch_id
         JOIN election_eligible_branches eb
           ON eb.branch_id = s.branch_id AND eb.election_id = %s
+        JOIN elections presidential_election
+          ON presidential_election.id = eb.election_id
         WHERE UPPER(s.usn) = %s
           AND a.role = 'STUDENT'
           AND a.is_active = TRUE
           AND b.is_active = TRUE
+          AND (presidential_election.admission_year IS NULL
+               OR s.admission_year = presidential_election.admission_year)
+          AND (presidential_election.academic_year IS NULL
+               OR s.academic_year = presidential_election.academic_year)
+          AND (presidential_election.semester IS NULL
+               OR s.semester = presidential_election.semester)
           AND EXISTS (
               SELECT 1
               FROM elections branch_election
@@ -3867,9 +4025,17 @@ def list_principal_eligible_candidates(election_id):
                     JOIN branches b ON b.id = s.branch_id
                     JOIN election_eligible_branches eb
                       ON eb.branch_id = s.branch_id AND eb.election_id = %s
+                    JOIN elections presidential_election
+                      ON presidential_election.id = eb.election_id
                     WHERE a.role = 'STUDENT'
                       AND a.is_active = TRUE
                       AND b.is_active = TRUE
+                      AND (presidential_election.admission_year IS NULL
+                           OR s.admission_year = presidential_election.admission_year)
+                      AND (presidential_election.academic_year IS NULL
+                           OR s.academic_year = presidential_election.academic_year)
+                      AND (presidential_election.semester IS NULL
+                           OR s.semester = presidential_election.semester)
                       AND EXISTS (
                           SELECT 1
                           FROM elections branch_election
@@ -4072,7 +4238,7 @@ def start_principal_election(election_id):
                     return jsonify({"status": "error", "message": "Only draft elections can be started."}), 409
                 if not election[7] or not 1 <= election[7] <= 10080:
                     return jsonify({"status": "error", "message": "Invalid election duration."}), 400
-                if election[13] < 2:
+                if election[14] < 2:
                     return jsonify({
                         "status": "error",
                         "message": "At least two approved candidates are required to start the election.",
@@ -4090,7 +4256,7 @@ def start_principal_election(election_id):
                 opens_at, closes_at = cur.fetchone()
                 write_audit_event(cur, "PRINCIPAL_ELECTION_STARTED", {
                     "election_id": election_id,
-                    "approved_candidates": election[13],
+                    "approved_candidates": election[14],
                     "duration_minutes": election[7],
                     "started_by": session["account_id"],
                 }, election_id)
@@ -4589,8 +4755,8 @@ def reset_password():
         return jsonify({"status": "error", "message": "Invalid request."}), 400
     if not token or len(token) > 200:
         return jsonify({"status": "error", "message": "This reset link is invalid or expired."}), 400
-    if len(password) < 12:
-        return jsonify({"status": "error", "message": "Use a password with at least 12 characters."}), 400
+    if len(password) < 12 or len(password) > 128:
+        return jsonify({"status": "error", "message": "Use a password with 12–128 characters."}), 400
     if password != confirm_password:
         return jsonify({"status": "error", "message": "Passwords do not match."}), 400
 
@@ -5335,6 +5501,7 @@ def add_hod_election_candidate(election_id):
                     SELECT
                         e.branch_id,
                         e.admission_year,
+                        e.academic_year,
                         e.semester,
                         e.election_type,
                         e.status
@@ -5359,7 +5526,7 @@ def add_hod_election_candidate(election_id):
                         "message": "Election not found in your department."
                     }), 404
 
-                branch_id, admission_year, semester, election_type, status = election
+                branch_id, admission_year, academic_year, semester, election_type, status = election
 
                 if status not in ("DRAFT", "SCHEDULED"):
                     return jsonify({
@@ -5375,6 +5542,7 @@ def add_hod_election_candidate(election_id):
                     WHERE UPPER(s.usn) = %s
                       AND s.branch_id = %s
                       AND s.admission_year = %s
+                      AND s.academic_year = %s
                       AND s.semester = %s
                       AND a.role = 'STUDENT'
                       AND a.is_active = TRUE;
@@ -5382,6 +5550,7 @@ def add_hod_election_candidate(election_id):
                     usn,
                     branch_id,
                     admission_year,
+                    academic_year,
                     semester
                 ))
 
@@ -5446,6 +5615,7 @@ def add_hod_election_candidate(election_id):
                         "symbol_key": symbol_key,
                         "election_type": election_type,
                         "admission_year": admission_year,
+                        "academic_year": academic_year,
                         "semester": semester
                     },
                     election_id
@@ -7016,11 +7186,11 @@ def update_hod_student(student_id):
         return auth_error
 
     data = request.get_json(silent=True) or {}
-    allowed_fields = {"name", "semester", "admission_year"}
+    allowed_fields = {"name", "semester", "admission_year", "academic_year"}
     if not data or not set(data).issubset(allowed_fields):
         return jsonify({
             "status": "error",
-            "message": "Provide name, semester, and/or admission_year only.",
+            "message": "Provide name, semester, admission_year, and/or academic_year only.",
         }), 400
 
     updates = []
@@ -7041,12 +7211,17 @@ def update_hod_student(student_id):
             return jsonify({"status": "error", "message": "Enter a valid admission year."}), 400
         updates.append("admission_year = %s")
         values.append(data["admission_year"])
+    if "academic_year" in data:
+        if not valid_admission_year(data["academic_year"]):
+            return jsonify({"status": "error", "message": "Enter a valid academic year."}), 400
+        updates.append("academic_year = %s")
+        values.append(data["academic_year"])
 
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT s.account_id, s.full_name, s.semester, s.admission_year,
+                    SELECT s.account_id, s.full_name, s.semester, s.admission_year, s.academic_year,
                            s.usn, a.full_name
                     FROM students s
                     JOIN accounts a ON a.id = s.account_id
@@ -7062,7 +7237,7 @@ def update_hod_student(student_id):
                 if not current:
                     return jsonify({"status": "error", "message": "Student not found in your department."}), 404
 
-                if "semester" in data or "admission_year" in data:
+                if any(field in data for field in ("semester", "admission_year", "academic_year")):
                     cur.execute("""
                         SELECT EXISTS (
                             SELECT 1
@@ -7086,12 +7261,12 @@ def update_hod_student(student_id):
                     UPDATE students
                     SET {', '.join(updates)}
                     WHERE id = %s
-                    RETURNING id, full_name, usn, semester, admission_year, account_id;
+                    RETURNING id, full_name, usn, semester, admission_year, academic_year, account_id;
                 """, tuple(values))
                 updated = cur.fetchone()
                 if "name" in data:
                     cur.execute("UPDATE accounts SET full_name = %s WHERE id = %s;", (
-                        updated[1], updated[5],
+                        updated[1], updated[6],
                     ))
                 write_audit_event(cur, "STUDENT_UPDATED", {
                     "student_id": updated[0],
@@ -7100,12 +7275,12 @@ def update_hod_student(student_id):
                     "before": {
                         "name": current[1],
                         "semester": current[2],
-                        "admission_year": current[3],
+                        "admission_year": current[3], "academic_year": current[4],
                     },
                     "after": {
                         "name": updated[1],
                         "semester": updated[3],
-                        "admission_year": updated[4],
+                        "admission_year": updated[4], "academic_year": updated[5],
                     },
                 })
 
@@ -7115,6 +7290,7 @@ def update_hod_student(student_id):
             "student": {
                 "id": updated[0], "name": updated[1], "usn": updated[2],
                 "semester": updated[3], "admission_year": updated[4],
+                "academic_year": updated[5],
             },
         }), 200
     except Exception:
@@ -7412,10 +7588,13 @@ def get_hod_classes():
 
                 branch_id, branch_name = branch
 
-                # Group students by admission year and semester.
+                # Academic year is part of the class cohort; do not merge
+                # different cohorts that happen to share an admission year
+                # and semester.
                 cur.execute("""
                     SELECT
                         s.admission_year,
+                        s.academic_year,
                         s.semester,
                         COUNT(s.id) AS total_students,
                         COUNT(*) FILTER (
@@ -7436,9 +7615,11 @@ def get_hod_classes():
                       AND a.role = 'STUDENT'
                     GROUP BY
                         s.admission_year,
+                        s.academic_year,
                         s.semester
                     ORDER BY
                         s.admission_year DESC,
+                        s.academic_year DESC NULLS LAST,
                         s.semester ASC;
                 """, (branch_id,))
 
@@ -7449,12 +7630,13 @@ def get_hod_classes():
                 for row in rows:
                     classes.append({
                         "admission_year": row[0],
-                        "semester": row[1],
-                        "total_students": row[2],
-                        "active_students": row[3],
-                        "inactive_students": row[4],
-                        "cr_count": row[5],
-                        "fr_count": row[6]
+                        "academic_year": row[1],
+                        "semester": row[2],
+                        "total_students": row[3],
+                        "active_students": row[4],
+                        "inactive_students": row[5],
+                        "cr_count": row[6],
+                        "fr_count": row[7]
                     })
 
         return jsonify({
@@ -7480,7 +7662,7 @@ def _isoformat(value):
 def _student_record(cur, account_id):
     cur.execute("""
         SELECT s.id, s.full_name, s.usn, a.email, b.name, b.code,
-               s.admission_year, s.semester, a.is_active
+               s.admission_year, s.academic_year, s.semester, a.is_active
         FROM students s
         JOIN accounts a ON a.id = s.account_id
         JOIN branches b ON b.id = s.branch_id
@@ -7595,7 +7777,8 @@ def student_dashboard():
             "profile": {
                 "id": student[0], "full_name": student[1], "usn": student[2],
                 "email": student[3], "branch_name": student[4], "branch_code": student[5],
-                "admission_year": student[6], "semester": student[7], "is_active": student[8],
+                "admission_year": student[6], "academic_year": student[7],
+                "semester": student[8], "is_active": student[9],
             },
             "statistics": {
                 "eligible_elections": counts[0], "active_elections": counts[1],
