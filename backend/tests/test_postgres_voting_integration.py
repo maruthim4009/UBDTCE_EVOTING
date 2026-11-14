@@ -7,6 +7,7 @@ when an operator explicitly supplies ``UBDTCE_TEST_DATABASE_URL`` and sets
 """
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 from pathlib import Path
 import os
 import re
@@ -21,7 +22,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app import app
+from app import app, process_pending_activation_emails
 
 
 class PostgreSQLVotingIntegrationTests(unittest.TestCase):
@@ -139,6 +140,83 @@ class PostgreSQLVotingIntegrationTests(unittest.TestCase):
             session_data["role"] = "STUDENT"
         return client
 
+    @staticmethod
+    def _hod_client(account_id):
+        client = app.test_client()
+        with client.session_transaction() as session_data:
+            session_data["account_id"] = account_id
+            session_data["role"] = "HOD"
+        return client
+
+    @classmethod
+    def _new_hod_fixture(cls):
+        cls.fixture_number += 1
+        number = cls.fixture_number
+        with psycopg.connect(cls.conninfo) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO branches (name, code) VALUES (%s, %s) RETURNING id;",
+                    (f"Activation Branch {number}", f"A{number:03d}"),
+                )
+                branch_id = cur.fetchone()[0]
+                cur.execute(
+                    """
+                    INSERT INTO accounts (email, role, full_name)
+                    VALUES (%s, 'HOD', 'Synthetic HOD') RETURNING id;
+                    """,
+                    (f"hod-activation-{number}@example.test",),
+                )
+                hod_account_id = cur.fetchone()[0]
+                cur.execute(
+                    "INSERT INTO hod_assignments (account_id, branch_id) VALUES (%s, %s);",
+                    (hod_account_id, branch_id),
+                )
+        return hod_account_id, branch_id, number
+
+    @classmethod
+    def _new_activation_fixture(cls, expires_in_hours=24):
+        cls.fixture_number += 1
+        number = cls.fixture_number
+        token = f"synthetic-activation-token-{number}"
+        token_hash = hashlib.sha256(token.encode("utf-8")).digest()
+        with psycopg.connect(cls.conninfo) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO branches (name, code) VALUES (%s, %s) RETURNING id;",
+                    (f"Token Branch {number}", f"K{number:03d}"),
+                )
+                branch_id = cur.fetchone()[0]
+                email = f"activation-{number}@example.test"
+                cur.execute(
+                    """
+                    INSERT INTO accounts (email, role, full_name)
+                    VALUES (%s, 'STUDENT', 'Synthetic Activation Student')
+                    RETURNING id;
+                    """,
+                    (email,),
+                )
+                account_id = cur.fetchone()[0]
+                cur.execute(
+                    """
+                    INSERT INTO students (
+                        account_id, usn, full_name, branch_id, semester,
+                        admission_year, academic_year
+                    ) VALUES (%s, %s, 'Synthetic Activation Student', %s, 4, 2026, 2026)
+                    RETURNING id;
+                    """,
+                    (account_id, f"4UB26AK{number:03d}", branch_id),
+                )
+                student_id = cur.fetchone()[0]
+                cur.execute(
+                    """
+                    INSERT INTO student_activation_tokens (
+                        account_id, token_hash, expires_at
+                    ) VALUES (%s, %s, CURRENT_TIMESTAMP + (%s * INTERVAL '1 hour'));
+                    """,
+                    (account_id, token_hash, expires_in_hours),
+                )
+        return account_id, student_id, email, token
+
     def _counts(self, election_id):
         with psycopg.connect(self.conninfo) as conn:
             with conn.cursor() as cur:
@@ -214,6 +292,151 @@ class PostgreSQLVotingIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 503)
         self.assertEqual(self._counts(election_id), (0, 0, 0))
+
+    def test_individual_registration_creates_one_pending_activation_job(self):
+        hod_account_id, _branch_id, number = self._new_hod_fixture()
+        email = f"new-student-{number}@example.test"
+        response = self._hod_client(hod_account_id).post(
+            "/api/hod/students",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            json={
+                "name": "Synthetic New Student",
+                "usn": f"4UB26AR{number:03d}",
+                "email": email,
+                "semester": 4,
+                "admission_year": 2026,
+                "academic_year": 2026,
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.get_json()["activation_email_queued"])
+
+        with psycopg.connect(self.conninfo) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT a.email, COUNT(j.id), MIN(j.status)
+                    FROM accounts a
+                    JOIN student_activation_email_jobs j ON j.account_id = a.id
+                    WHERE LOWER(a.email) = %s
+                    GROUP BY a.email;
+                    """,
+                    (email,),
+                )
+                row = cur.fetchone()
+        self.assertEqual(row, (email, 1, "PENDING"))
+
+    @patch("app.smtplib.SMTP")
+    def test_worker_sends_to_registered_email_then_records_sent(self, smtp):
+        # Other tests intentionally leave their registration job pending. This
+        # worker test must claim only the job whose recipient it asserts.
+        with psycopg.connect(self.conninfo) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE student_activation_email_jobs
+                    SET status = 'CANCELLED', locked_at = NULL,
+                        next_attempt_at = NULL
+                    WHERE status IN ('PENDING', 'PROCESSING');
+                    """
+                )
+
+        account_id, _student_id, email, _token = self._new_activation_fixture()
+        with psycopg.connect(self.conninfo) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO student_activation_email_jobs (account_id) VALUES (%s);",
+                    (account_id,),
+                )
+
+        with patch.dict(os.environ, {
+            "EMAIL_TEST_MODE": "false",
+            "SMTP_EMAIL": "sender@example.test",
+            "SMTP_APP_PASSWORD": "synthetic-test-password",
+            "SMTP_HOST": "smtp.example.test",
+            "SMTP_PORT": "587",
+            "SMTP_USERNAME": "sender@example.test",
+            "SMTP_FROM_EMAIL": "sender@example.test",
+            "SMTP_USE_SSL": "false",
+            "SMTP_USE_STARTTLS": "true",
+            "STUDENT_ACTIVATION_URL": "https://portal.example.test/student-activate",
+        }, clear=False):
+            summary = process_pending_activation_emails(limit=1)
+
+        self.assertEqual(summary, {"attempted": 1, "sent": 1, "failed": 0, "skipped": 0})
+        server = smtp.return_value.__enter__.return_value
+        message = server.send_message.call_args.args[0]
+        self.assertEqual(message["To"], email)
+
+        with psycopg.connect(self.conninfo) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT status, attempts, sent_at IS NOT NULL
+                    FROM student_activation_email_jobs
+                    WHERE account_id = %s;
+                    """,
+                    (account_id,),
+                )
+                self.assertEqual(cur.fetchone(), ("SENT", 1, True))
+
+    def test_activation_creates_credentials_and_consumes_token(self):
+        account_id, _student_id, _email, token = self._new_activation_fixture()
+        request = {
+            "headers": {"X-Requested-With": "XMLHttpRequest"},
+            "json": {
+                "token": token,
+                "password": "synthetic-password-123",
+                "confirm_password": "synthetic-password-123",
+            },
+        }
+        client = app.test_client()
+        self.assertEqual(
+            client.post("/api/student/activation/complete", **request).status_code,
+            200,
+        )
+        self.assertEqual(
+            client.post("/api/student/activation/complete", **request).status_code,
+            400,
+        )
+
+        with psycopg.connect(self.conninfo) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM account_credentials WHERE account_id = %s;",
+                    (account_id,),
+                )
+                self.assertIsNotNone(cur.fetchone())
+                cur.execute(
+                    """
+                    SELECT used_at IS NOT NULL
+                    FROM student_activation_tokens
+                    WHERE account_id = %s;
+                    """,
+                    (account_id,),
+                )
+                self.assertEqual(cur.fetchone(), (True,))
+
+    def test_activation_rejects_expired_token(self):
+        account_id, _student_id, _email, token = self._new_activation_fixture(-1)
+        response = app.test_client().post(
+            "/api/student/activation/complete",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            json={
+                "token": token,
+                "password": "synthetic-password-123",
+                "confirm_password": "synthetic-password-123",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+
+        with psycopg.connect(self.conninfo) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM account_credentials WHERE account_id = %s;",
+                    (account_id,),
+                )
+                self.assertIsNone(cur.fetchone())
 
 
 if __name__ == "__main__":

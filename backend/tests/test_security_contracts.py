@@ -9,7 +9,10 @@ from pathlib import Path
 import sys
 import unittest
 from datetime import datetime, timezone
+from email.message import EmailMessage
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
+import os
 import smtplib
 import inspect
 
@@ -29,6 +32,9 @@ from app import (
     send_hod_setup_email,
     send_reset_email,
     send_student_activation_email,
+    deliver_email,
+    student_activation_link,
+    valid_admission_year,
     valid_email_address,
     create_principal_election,
     cast_student_vote,
@@ -170,6 +176,28 @@ class AuthorizationAndBallotContractTests(unittest.TestCase):
         self.assertFalse(valid_email_address("student@example"))
         self.assertFalse(valid_email_address("student@example.edu\r\nBcc: victim@example.edu"))
 
+    def test_academic_year_inputs_are_limited_to_2022_through_2048(self):
+        self.assertFalse(valid_admission_year(2021))
+        self.assertTrue(valid_admission_year(2022))
+        self.assertTrue(valid_admission_year(2048))
+        self.assertFalse(valid_admission_year(2049))
+
+        root = Path(__file__).resolve().parents[2]
+        hod_source = (root / "frontend" / "src" / "HODDashboard.jsx").read_text(
+            encoding="utf-8"
+        )
+        principal_source = (root / "frontend" / "src" / "App.jsx").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "Array.from({ length: 27 }, (_, index) => 2022 + index)",
+            hod_source,
+        )
+        self.assertIn(
+            "Array.from({ length: 27 }, (_, index) => 2022 + index)",
+            principal_source,
+        )
+
     def test_branded_email_templates_render_plain_and_html_without_sending(self):
         with patch("app.deliver_email") as deliver:
             send_student_activation_email(
@@ -187,6 +215,93 @@ class AuthorizationAndBallotContractTests(unittest.TestCase):
             self.assertIn("UBDTCE", message["Subject"] + message["From"])
             self.assertIsNotNone(message.get_body(preferencelist=("plain",)))
             self.assertIsNotNone(message.get_body(preferencelist=("html",)))
+
+    def test_student_activation_link_uses_frontend_route_and_replaces_token(self):
+        with patch.dict(os.environ, {}, clear=True):
+            default_link = student_activation_link("synthetic-default-token")
+
+        default_parsed = urlsplit(default_link)
+        self.assertEqual(default_parsed.path, "/student-activate")
+        self.assertEqual(
+            parse_qs(default_parsed.query), {"token": ["synthetic-default-token"]}
+        )
+
+        with patch.dict(os.environ, {
+            "STUDENT_ACTIVATION_URL": (
+                "https://portal.example.test/student-activate?campaign=welcome&token=old"
+            ),
+        }, clear=False):
+            link = student_activation_link("synthetic-token")
+
+        parsed = urlsplit(link)
+        self.assertEqual(parsed.scheme, "https")
+        self.assertEqual(parsed.netloc, "portal.example.test")
+        self.assertEqual(parsed.path, "/student-activate")
+        self.assertEqual(
+            parse_qs(parsed.query),
+            {"campaign": ["welcome"], "token": ["synthetic-token"]},
+        )
+
+    @patch("app.smtplib.SMTP")
+    def test_smtp_delivery_uses_starttls_and_accepts_one_recipient(self, smtp):
+        message = EmailMessage()
+        message["From"] = "UBDTCE Secure <sender@example.test>"
+        message["To"] = "student@example.test"
+        message["Subject"] = "Synthetic activation invitation"
+        message.set_content("Synthetic test message")
+
+        with patch.dict(os.environ, {
+            "EMAIL_TEST_MODE": "false",
+            "SMTP_EMAIL": "sender@example.test",
+            "SMTP_APP_PASSWORD": "synthetic-test-password",
+            "SMTP_HOST": "smtp.example.test",
+            "SMTP_PORT": "587",
+            "SMTP_USERNAME": "sender@example.test",
+            "SMTP_FROM_EMAIL": "sender@example.test",
+            "SMTP_USE_SSL": "false",
+            "SMTP_USE_STARTTLS": "true",
+        }, clear=False):
+            deliver_email(message)
+
+        server = smtp.return_value.__enter__.return_value
+        server.starttls.assert_called_once()
+        server.login.assert_called_once_with(
+            "sender@example.test", "synthetic-test-password"
+        )
+        server.send_message.assert_called_once_with(message)
+
+    @patch("app.smtplib.SMTP")
+    def test_smtp_delivery_rejects_insecure_transport(self, smtp):
+        message = EmailMessage()
+        message["To"] = "student@example.test"
+        message.set_content("Synthetic test message")
+
+        with patch.dict(os.environ, {
+            "EMAIL_TEST_MODE": "false",
+            "SMTP_EMAIL": "sender@example.test",
+            "SMTP_APP_PASSWORD": "synthetic-test-password",
+            "SMTP_HOST": "smtp.example.test",
+            "SMTP_PORT": "587",
+            "SMTP_USERNAME": "sender@example.test",
+            "SMTP_FROM_EMAIL": "sender@example.test",
+            "SMTP_USE_SSL": "false",
+            "SMTP_USE_STARTTLS": "false",
+        }, clear=False):
+            with self.assertRaisesRegex(RuntimeError, "Email service is not configured"):
+                deliver_email(message)
+
+        smtp.assert_not_called()
+
+    def test_frontend_student_activation_extracts_token_and_calls_activation_api(self):
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "frontend"
+            / "src"
+            / "App.jsx"
+        ).read_text(encoding="utf-8")
+        self.assertIn('currentAuthPath === "/student-activate"', source)
+        self.assertIn('const token = params.get("token") || recoveryToken;', source)
+        self.assertIn('`${API_BASE}/student/activation/complete`', source)
 
     def test_smtp_retry_classification_handles_temporary_and_permanent_failures(self):
         self.assertTrue(is_retryable_email_failure(smtplib.SMTPResponseException(421, b"busy")))
@@ -212,6 +327,7 @@ class AuthorizationAndBallotContractTests(unittest.TestCase):
         self.assertIn("cardinality(%s::text[]) = 0", source)
         self.assertIn("branch_election.election_type = ANY(%s::text[])", source)
         self.assertIn("branch_election.status = 'CLOSED'", source)
+        self.assertIn("elected.symbol_key", source)
 
     def test_vote_transaction_rechecks_state_and_audits_without_voter_identity(self):
         source = inspect.getsource(cast_student_vote)

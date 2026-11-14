@@ -145,8 +145,8 @@ COLLEGE_ELECTION_POLICIES = {
 }
 COLLEGE_ELECTION_TYPES = tuple(COLLEGE_ELECTION_POLICIES)
 
-MIN_ADMISSION_YEAR = 2000
-MAX_ADMISSION_YEAR = 2100
+MIN_ADMISSION_YEAR = 2022
+MAX_ADMISSION_YEAR = 2048
 EMAIL_ADDRESS_PATTERN = re.compile(
     r"^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@"
     r"[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?"
@@ -599,6 +599,8 @@ def deliver_email(message):
     smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
     smtp_username = os.getenv("SMTP_USERNAME", smtp_email or "").strip()
     smtp_from_email = configured_sender_address()
+    use_ssl = env_bool("SMTP_USE_SSL", False)
+    use_starttls = env_bool("SMTP_USE_STARTTLS", True)
 
     if (
         not smtp_email
@@ -610,13 +612,14 @@ def deliver_email(message):
         or not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", smtp_host)
         or "\r" in smtp_username
         or "\n" in smtp_username
+        or not (use_ssl or use_starttls)
     ):
         app.logger.error("SMTP configuration is missing.")
         raise RuntimeError("Email service is not configured.")
 
     port = _smtp_port()
     timeout_seconds = 15
-    if env_bool("SMTP_USE_SSL", False):
+    if use_ssl:
         with smtplib.SMTP_SSL(
             smtp_host,
             port,
@@ -630,7 +633,7 @@ def deliver_email(message):
 
     with smtplib.SMTP(smtp_host, port, timeout=timeout_seconds) as server:
         server.ehlo()
-        if env_bool("SMTP_USE_STARTTLS", True):
+        if use_starttls:
             server.starttls(context=ssl.create_default_context())
             server.ehlo()
         server.login(smtp_username, smtp_password)
@@ -1531,7 +1534,13 @@ def student_activation_link(token):
     if not isinstance(token, str) or not token:
         raise ValueError("Activation token is invalid.")
 
-    configured_url = os.getenv("STUDENT_ACTIVATION_URL", "").strip()
+    # Preserve the original local frontend route for installations that have
+    # not yet supplied a deployment-specific public URL. Any configured value
+    # remains strictly validated below, so a typo cannot send a broken link.
+    configured_url = os.getenv(
+        "STUDENT_ACTIVATION_URL",
+        "http://localhost:5173/student-activate",
+    ).strip()
     parsed = urlsplit(configured_url)
     if (
         parsed.scheme not in {"http", "https"}
@@ -4043,7 +4052,54 @@ def _principal_eligible_candidates(cur, election_id, election_type, usn=None):
     policy = COLLEGE_ELECTION_POLICIES[election_type]
     winner_types = list(policy["winner_types"])
     cur.execute("""
-        SELECT DISTINCT s.id, s.full_name, s.usn, b.name
+        WITH representative_winners AS (
+            SELECT DISTINCT ON (elected.student_id, branch_election.branch_id)
+                elected.student_id,
+                branch_election.branch_id,
+                elected.symbol_key,
+                branch_election.election_type,
+                branch_election.title
+            FROM elections branch_election
+            JOIN candidates elected
+              ON elected.election_id = branch_election.id
+             AND elected.is_approved = TRUE
+             AND elected.review_status = 'APPROVED'
+            WHERE branch_election.election_type = ANY(%s::text[])
+              AND branch_election.status = 'CLOSED'
+              AND (
+                  SELECT COUNT(*)
+                  FROM ballots winning_ballot
+                  WHERE winning_ballot.election_id = branch_election.id
+                    AND winning_ballot.candidate_id = elected.id
+              ) > 0
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM candidates challenger
+                  WHERE challenger.election_id = branch_election.id
+                    AND challenger.is_approved = TRUE
+                    AND challenger.review_status = 'APPROVED'
+                    AND (
+                        SELECT COUNT(*) FROM ballots challenger_ballot
+                        WHERE challenger_ballot.election_id = branch_election.id
+                          AND challenger_ballot.candidate_id = challenger.id
+                    ) > (
+                        SELECT COUNT(*) FROM ballots elected_ballot
+                        WHERE elected_ballot.election_id = branch_election.id
+                          AND elected_ballot.candidate_id = elected.id
+                    )
+              )
+            ORDER BY elected.student_id, branch_election.branch_id,
+                     branch_election.closes_at DESC, branch_election.id DESC,
+                     elected.id
+        )
+        SELECT DISTINCT
+            s.id,
+            s.full_name,
+            s.usn,
+            b.name,
+            representative_winners.symbol_key,
+            representative_winners.election_type,
+            representative_winners.title
         FROM students s
         JOIN accounts a ON a.id = s.account_id
         JOIN branches b ON b.id = s.branch_id
@@ -4051,6 +4107,9 @@ def _principal_eligible_candidates(cur, election_id, election_type, usn=None):
           ON eb.branch_id = s.branch_id AND eb.election_id = %s
         JOIN elections college_election
           ON college_election.id = eb.election_id
+        LEFT JOIN representative_winners
+          ON representative_winners.student_id = s.id
+         AND representative_winners.branch_id = s.branch_id
         WHERE (%s::text IS NULL OR UPPER(s.usn) = %s)
           AND a.role = 'STUDENT'
           AND a.is_active = TRUE
@@ -4063,43 +4122,10 @@ def _principal_eligible_candidates(cur, election_id, election_type, usn=None):
                OR s.semester = college_election.semester)
           AND (
               cardinality(%s::text[]) = 0
-              OR EXISTS (
-              SELECT 1
-              FROM elections branch_election
-              JOIN candidates elected
-                ON elected.election_id = branch_election.id
-               AND elected.student_id = s.id
-               AND elected.is_approved = TRUE
-               AND elected.review_status = 'APPROVED'
-              WHERE branch_election.branch_id = s.branch_id
-                AND branch_election.election_type = ANY(%s::text[])
-                AND branch_election.status = 'CLOSED'
-                AND (
-                    SELECT COUNT(*)
-                    FROM ballots winning_ballot
-                    WHERE winning_ballot.election_id = branch_election.id
-                      AND winning_ballot.candidate_id = elected.id
-                ) > 0
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM candidates challenger
-                    WHERE challenger.election_id = branch_election.id
-                      AND challenger.is_approved = TRUE
-                      AND challenger.review_status = 'APPROVED'
-                      AND (
-                          SELECT COUNT(*) FROM ballots challenger_ballot
-                          WHERE challenger_ballot.election_id = branch_election.id
-                            AND challenger_ballot.candidate_id = challenger.id
-                      ) > (
-                          SELECT COUNT(*) FROM ballots elected_ballot
-                          WHERE elected_ballot.election_id = branch_election.id
-                            AND elected_ballot.candidate_id = elected.id
-                      )
-                )
-              )
+               OR representative_winners.student_id IS NOT NULL
           )
         ORDER BY b.name, s.usn;
-    """, (election_id, usn, usn, winner_types, winner_types))
+    """, (winner_types, election_id, usn, usn, winner_types))
     return cur.fetchall()
 
 
@@ -4123,7 +4149,18 @@ def list_principal_eligible_candidates(election_id):
                 if not election:
                     return jsonify({"status": "error", "message": "College-wide election not found."}), 404
                 rows = _principal_eligible_candidates(cur, election_id, election[3])
-                candidates = [{"usn": row[2], "branch": row[3]} for row in rows]
+                candidates = [
+                    {
+                        "name": row[1],
+                        "usn": row[2],
+                        "branch": row[3],
+                        "representative_symbol_key": row[4],
+                        "representative_symbol": candidate_symbol_payload(row[4]),
+                        "representative_type": row[5],
+                        "representative_election": row[6],
+                    }
+                    for row in rows
+                ]
         return jsonify({
             "status": "ok",
             "candidate_eligibility": COLLEGE_ELECTION_POLICIES[election[3]]["eligibility"],
