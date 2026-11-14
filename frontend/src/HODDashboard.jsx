@@ -119,7 +119,9 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
     String(classItem.admission_year) === classYearFilter;
   const academicYearMatches =
     !classAcademicYearFilter ||
-    String(classItem.academic_year || "") === classAcademicYearFilter;
+    (classAcademicYearFilter === "null"
+      ? classItem.academic_year === null
+      : String(classItem.academic_year ?? "") === classAcademicYearFilter);
 
   const semesterMatches =
     !classSemesterFilter ||
@@ -127,6 +129,27 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
 
   return yearMatches && academicYearMatches && semesterMatches;
 });
+  const classAdmissionYears = useMemo(
+    () => [...new Set(classes
+      .map((classItem) => classItem.admission_year)
+      .filter((year) => year != null))].sort((left, right) => right - left),
+    [classes]
+  );
+  const classAcademicYears = useMemo(
+    () => [...new Set(classes
+      .map((classItem) => classItem.academic_year)
+      .filter((year) => year != null))].sort((left, right) => right - left),
+    [classes]
+  );
+  const classSemesters = useMemo(
+    () => [...new Set(classes
+      .map((classItem) => classItem.semester)
+      .filter((semester) => semester != null))].sort((left, right) => left - right),
+    [classes]
+  );
+  const hasStudentsWithoutAcademicYear = classes.some(
+    (classItem) => classItem.academic_year === null
+  );
   const fullName = currentUser?.full_name || "Department Head";
 
   const initials = fullName
@@ -144,7 +167,9 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
         String(student.admission_year || "") === String(filterYear);
       const academicYearMatches =
         !filterAcademicYear ||
-        String(student.academic_year || "") === String(filterAcademicYear);
+        (filterAcademicYear === "null"
+          ? student.academic_year === null
+          : String(student.academic_year ?? "") === String(filterAcademicYear));
 
       const semesterMatches =
         !filterSemester ||
@@ -461,8 +486,8 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
   setStudentMessage("");
   setStudentError("");
 
-  if (page === "classes") {
-    loadClasses();
+  if (page === "students" || page === "classes") {
+    void loadClasses();
   }
   if (page === "elections" || page === "candidates" || page === "results") {
     loadHodElections();
@@ -1461,7 +1486,7 @@ async function handleConfirmImport() {
                     >
                       <option value="">All Admission Years</option>
 
-                      {admissionYears.map((year) => (
+                      {classAdmissionYears.map((year) => (
                         <option key={year} value={year}>
                           {year}
                         </option>
@@ -1480,9 +1505,12 @@ async function handleConfirmImport() {
                       }}
                     >
                       <option value="">All Academic Years</option>
-                      {admissionYears.map((year) => (
+                      {classAcademicYears.map((year) => (
                         <option key={year} value={year}>{year}</option>
                       ))}
+                      {hasStudentsWithoutAcademicYear && (
+                        <option value="null">Not specified</option>
+                      )}
                     </select>
                   </label>
 
@@ -1498,7 +1526,7 @@ async function handleConfirmImport() {
                     >
                       <option value="">All Semesters</option>
 
-                      {semesters.map((semester) => (
+                      {classSemesters.map((semester) => (
                         <option key={semester} value={semester}>
                           Semester {semester}
                         </option>
@@ -1734,7 +1762,7 @@ async function handleConfirmImport() {
       >
         <option value="">Select admission year</option>
 
-        {admissionYears.map((year) => (
+        {classAdmissionYears.map((year) => (
           <option key={year} value={year}>
             {year}
           </option>
@@ -1753,11 +1781,14 @@ async function handleConfirmImport() {
       >
         <option value="">Select academic year</option>
 
-        {admissionYears.map((year) => (
+        {classAcademicYears.map((year) => (
           <option key={year} value={year}>
             {year}
           </option>
         ))}
+        {hasStudentsWithoutAcademicYear && (
+          <option value="null">Not specified</option>
+        )}
       </select>
     </label>
 
@@ -1772,7 +1803,7 @@ async function handleConfirmImport() {
       >
         <option value="">Select semester</option>
 
-        {semesters.map((semester) => (
+        {classSemesters.map((semester) => (
           <option key={semester} value={semester}>
             Semester {semester}
           </option>
@@ -1817,7 +1848,9 @@ async function handleConfirmImport() {
   tabIndex={0}
   onClick={() => {
     setFilterYear(String(classItem.admission_year));
-    setFilterAcademicYear(String(classItem.academic_year));
+    setFilterAcademicYear(
+      classItem.academic_year === null ? "null" : String(classItem.academic_year)
+    );
     setFilterSemester(String(classItem.semester));
     setActivePage("students");
     setSidebarOpen(false);
@@ -1833,6 +1866,11 @@ async function handleConfirmImport() {
                 <div>
                   <span>ADMISSION YEAR</span>
                   <h3>{classItem.admission_year || "Not specified"}</h3>
+                </div>
+
+                <div>
+                  <span>ACADEMIC YEAR</span>
+                  <h3>{classItem.academic_year ?? "Not specified"}</h3>
                 </div>
 
                 <span className="hod-class-semester">

@@ -271,6 +271,7 @@ class AuthorizationAndBallotContractTests(unittest.TestCase):
                 "005_integrity_symbols_outbox",
                 "006_performance_indexes",
                 "007_college_election_categories",
+                "008_academic_year_index_repair",
             ],
         )
         self.assertEqual(list(pending_migrations({})), list(MIGRATIONS))

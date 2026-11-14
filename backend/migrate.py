@@ -49,6 +49,11 @@ MIGRATIONS = (
     Migration("005_integrity_symbols_outbox", "integrity_symbols_outbox_migration.sql"),
     Migration("006_performance_indexes", "performance_indexes_migration.sql", "nontransactional"),
     Migration("007_college_election_categories", "college_election_categories_migration.sql", "transactional"),
+    Migration(
+        "008_academic_year_index_repair",
+        "academic_year_index_repair_migration.sql",
+        "nontransactional",
+    ),
 )
 
 
@@ -105,6 +110,30 @@ def current_database(cur) -> str:
     return cur.fetchone()[0]
 
 
+def execute_nontransactional_migration(cur, sql: str) -> None:
+    """Run each simple nontransactional statement in its own autocommit unit.
+
+    PostgreSQL rejects ``CREATE INDEX CONCURRENTLY`` when several statements
+    are sent as one implicit transaction block. Nontransactional migrations in
+    this project contain only standalone index statements and line comments;
+    remove those comments before splitting the statements for execution.
+    """
+    uncommented_sql = "\n".join(
+        line for line in sql.splitlines()
+        if not line.lstrip().startswith("--")
+    )
+    statements = [
+        statement.strip()
+        for statement in uncommented_sql.split(";")
+        if statement.strip()
+    ]
+    if not statements:
+        raise RuntimeError("Nontransactional migration contains no SQL statements.")
+
+    for statement in statements:
+        cur.execute(statement)
+
+
 def show_status(cur) -> int:
     cur.execute("SELECT to_regclass('public.schema_migrations');")
     if cur.fetchone()[0] is None:
@@ -157,7 +186,10 @@ def apply_migrations(cur, expected_database: str) -> None:
             # checksum compatibility; concurrent indexes require autocommit.
             # Both types are idempotent, so recovery after an interruption
             # before ledger insertion is a forward-only rerun.
-            cur.execute(sql)
+            if migration.mode == "nontransactional":
+                execute_nontransactional_migration(cur, sql)
+            else:
+                cur.execute(sql)
             cur.execute(
                 "INSERT INTO schema_migrations (version, checksum) VALUES (%s, %s);",
                 (migration.version, migration.checksum),

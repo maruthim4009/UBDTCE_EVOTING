@@ -6320,7 +6320,17 @@ def get_hod_students():
         search = request.args.get("search", "").strip()
         semester = request.args.get("semester", type=int)
         admission_year = request.args.get("admission_year", type=int)
-        academic_year = request.args.get("academic_year", type=int)
+        academic_year_arg = request.args.get("academic_year")
+        academic_year_is_null = academic_year_arg == "null"
+        academic_year = None
+        if academic_year_arg not in (None, "", "null"):
+            try:
+                academic_year = int(academic_year_arg)
+            except (TypeError, ValueError):
+                return jsonify({
+                    "status": "error",
+                    "message": "Invalid academic year."
+                }), 400
         
 
         if page < 1 or not 1 <= per_page <= 100:
@@ -6402,7 +6412,9 @@ def get_hod_students():
                     filters.append("s.admission_year = %s")
                     params.append(admission_year)    
 
-                if academic_year is not None:
+                if academic_year_is_null:
+                    filters.append("s.academic_year IS NULL")
+                elif academic_year is not None:
                     filters.append("s.academic_year = %s")
                     params.append(academic_year)
 
