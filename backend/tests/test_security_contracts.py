@@ -292,6 +292,42 @@ class AuthorizationAndBallotContractTests(unittest.TestCase):
 
         smtp.assert_not_called()
 
+    @patch("app.smtplib.SMTP")
+    def test_email_test_mode_is_not_reported_as_smtp_acceptance(self, smtp):
+        message = EmailMessage()
+        message["To"] = "student@example.test"
+        message.set_content("Synthetic test message")
+
+        with patch.dict(os.environ, {"EMAIL_TEST_MODE": "true"}, clear=False):
+            self.assertFalse(deliver_email(message))
+
+        smtp.assert_not_called()
+
+    @patch("app.smtplib.SMTP")
+    def test_smtp_recipient_refusal_is_not_treated_as_delivery(self, smtp):
+        message = EmailMessage()
+        message["From"] = "UBDTCE Secure <sender@example.test>"
+        message["To"] = "student@example.test"
+        message["Subject"] = "Synthetic activation invitation"
+        message.set_content("Synthetic test message")
+        smtp.return_value.__enter__.return_value.send_message.return_value = {
+            "student@example.test": (550, b"recipient rejected"),
+        }
+
+        with patch.dict(os.environ, {
+            "EMAIL_TEST_MODE": "false",
+            "SMTP_EMAIL": "sender@example.test",
+            "SMTP_APP_PASSWORD": "synthetic-test-password",
+            "SMTP_HOST": "smtp.example.test",
+            "SMTP_PORT": "587",
+            "SMTP_USERNAME": "sender@example.test",
+            "SMTP_FROM_EMAIL": "sender@example.test",
+            "SMTP_USE_SSL": "false",
+            "SMTP_USE_STARTTLS": "true",
+        }, clear=False):
+            with self.assertRaises(smtplib.SMTPRecipientsRefused):
+                deliver_email(message)
+
     def test_frontend_student_activation_extracts_token_and_calls_activation_api(self):
         source = (
             Path(__file__).resolve().parents[2]

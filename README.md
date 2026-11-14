@@ -124,17 +124,35 @@ Apply the project's database schema before starting the application.
 
 ### 4. Environment Configuration
 
-Create a `.env` file inside the `backend` directory.
+Create a `.env` file at the repository root. Both `backend/app.py` and the
+independent activation-email worker load this exact file; host-supplied
+environment variables take precedence.
 
 Example configuration:
 
 ```env
-DATABASE_URL=your_database_connection_string
-SMTP_EMAIL=your_email_address
-SMTP_APP_PASSWORD=your_email_app_password
+DB_HOST=127.0.0.1
+DB_PORT=5432
+DB_NAME=ubdtce_evoting
+DB_USER=your_database_user
+DB_PASSWORD=your_database_password
+
+SMTP_HOST=smtp.example.edu
+SMTP_PORT=587
+SMTP_EMAIL=sender@example.edu
+SMTP_USERNAME=sender@example.edu
+SMTP_APP_PASSWORD=your_smtp_app_password
+SMTP_FROM_EMAIL=sender@example.edu
+SMTP_USE_SSL=false
+SMTP_USE_STARTTLS=true
+EMAIL_TEST_MODE=false
+STUDENT_ACTIVATION_URL=https://portal.example.edu/student-activate
 ```
 
-Use the exact environment variable names required by the backend source code.
+For implicit TLS (commonly port 465), set `SMTP_USE_SSL=true` and
+`SMTP_USE_STARTTLS=false`. Use the exact environment variable names required
+by the backend source code. `EMAIL_TEST_MODE=true` deliberately suppresses SMTP
+delivery and must never be used for a real invitation campaign.
 
 **Never upload actual passwords, email app passwords, database credentials, or secret keys to GitHub.**
 
@@ -147,7 +165,7 @@ The frontend and backend must run in separate terminals.
 From the `backend` directory:
 
 ```bash
-python app.py
+..\.venv\Scripts\python.exe app.py
 ```
 
 Backend local address:
@@ -155,6 +173,20 @@ Backend local address:
 ```text
 http://127.0.0.1:5000
 ```
+
+### Start the activation-email worker
+
+The Flask API only queues invitations. Run the following command in a third
+terminal from the `backend` directory to deliver them; it must remain supervised
+by a service manager or scheduled-task wrapper in production:
+
+```powershell
+..\.venv\Scripts\python.exe email_worker.py --watch --limit 25 --interval-seconds 30
+```
+
+The worker reports SMTP-accepted messages as `sent`; `queued` and `pending`
+mean delivery has not yet been confirmed. Do not run it for real students until
+the sender configuration and an authorized test mailbox have been verified.
 
 ### Start the Frontend
 

@@ -554,6 +554,10 @@ ACTIVATION_EMAIL_JOB_LEASE_MINUTES = 15
 ACTIVATION_EMAIL_MAX_ATTEMPTS = 5
 
 
+class EmailDeliverySuppressed(RuntimeError):
+    """Raised when a worker is configured not to contact the SMTP provider."""
+
+
 def _smtp_port():
     """Return a validated SMTP port without exposing configuration values."""
     try:
@@ -592,7 +596,10 @@ def deliver_email(message):
     """
     if env_bool("EMAIL_TEST_MODE", False):
         app.logger.info("Email delivery suppressed because EMAIL_TEST_MODE is enabled.")
-        return
+        # Do not allow a caller to interpret test-mode suppression as SMTP
+        # acceptance.  In particular, the durable activation-email worker must
+        # never turn a job into SENT without an SMTP provider accepting it.
+        return False
 
     smtp_email = os.getenv("SMTP_EMAIL")
     smtp_password = os.getenv("SMTP_APP_PASSWORD")
@@ -628,8 +635,10 @@ def deliver_email(message):
         ) as server:
             server.ehlo()
             server.login(smtp_username, smtp_password)
-            server.send_message(message)
-        return
+            refused = server.send_message(message)
+            if isinstance(refused, dict) and refused:
+                raise smtplib.SMTPRecipientsRefused(refused)
+        return True
 
     with smtplib.SMTP(smtp_host, port, timeout=timeout_seconds) as server:
         server.ehlo()
@@ -637,7 +646,10 @@ def deliver_email(message):
             server.starttls(context=ssl.create_default_context())
             server.ehlo()
         server.login(smtp_username, smtp_password)
-        server.send_message(message)
+        refused = server.send_message(message)
+        if isinstance(refused, dict) and refused:
+            raise smtplib.SMTPRecipientsRefused(refused)
+    return True
 
 
 def is_retryable_email_failure(exc):
@@ -1717,7 +1729,7 @@ def send_student_activation_email(email, student_name, usn, token):
 
     message.add_alternative(html_body, subtype="html")
 
-    deliver_email(message)
+    return deliver_email(message)
 
 
 def queue_student_activation_email(cur, account_id, *, reset_attempts=False):
@@ -1727,20 +1739,42 @@ def queue_student_activation_email(cur, account_id, *, reset_attempts=False):
     outbox row. Normal registration keeps the budget intact, so repeated
     programmatic queueing cannot create unbounded delivery attempts.
     """
-    cur.execute("""
-        INSERT INTO student_activation_email_jobs (account_id, status)
-        VALUES (%s, 'PENDING')
-        ON CONFLICT (account_id) DO UPDATE
-        SET status = 'PENDING',
-            attempts = CASE WHEN %s THEN 0 ELSE student_activation_email_jobs.attempts END,
-            locked_at = NULL,
-            last_error = NULL,
-            failure_kind = NULL,
-            next_attempt_at = CURRENT_TIMESTAMP,
-            updated_at = CURRENT_TIMESTAMP
-        RETURNING id;
-    """, (account_id, reset_attempts))
-    return cur.fetchone()[0]
+    if reset_attempts:
+        # A HOD retry must not overwrite a live worker claim.  Otherwise an
+        # earlier worker could send an old link and subsequently mark the
+        # newly requeued job SENT.  Stale claims remain recoverable.
+        cur.execute("""
+            INSERT INTO student_activation_email_jobs (account_id, status)
+            VALUES (%s, 'PENDING')
+            ON CONFLICT (account_id) DO UPDATE
+            SET status = 'PENDING',
+                attempts = 0,
+                locked_at = NULL,
+                last_error = NULL,
+                failure_kind = NULL,
+                next_attempt_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE student_activation_email_jobs.status <> 'PROCESSING'
+               OR student_activation_email_jobs.locked_at < CURRENT_TIMESTAMP
+                   - (%s * INTERVAL '1 minute')
+            RETURNING id;
+        """, (account_id, ACTIVATION_EMAIL_JOB_LEASE_MINUTES))
+    else:
+        cur.execute("""
+            INSERT INTO student_activation_email_jobs (account_id, status)
+            VALUES (%s, 'PENDING')
+            ON CONFLICT (account_id) DO UPDATE
+            SET status = 'PENDING',
+                locked_at = NULL,
+                last_error = NULL,
+                failure_kind = NULL,
+                next_attempt_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING id;
+        """, (account_id,))
+
+    queued_job = cur.fetchone()
+    return queued_job[0] if queued_job else None
 
 
 def process_pending_activation_emails(limit=25):
@@ -1846,18 +1880,29 @@ def process_pending_activation_emails(limit=25):
 
         summary["attempted"] += 1
         delivered = False
+        retryable_failure = False
+        failure_message = "Permanent delivery failure; correct the recipient or provider configuration."
         try:
-            send_student_activation_email(
+            smtp_accepted = send_student_activation_email(
                 claimed["email"],
                 claimed["full_name"],
                 claimed["usn"],
                 claimed["token"],
             )
+            if smtp_accepted is not True:
+                raise EmailDeliverySuppressed(
+                    "Activation email delivery is suppressed by EMAIL_TEST_MODE."
+                )
             delivered = True
+        except EmailDeliverySuppressed:
+            # Test mode is intentionally not retried: it requires an operator
+            # to change configuration before any SMTP attempt can succeed.
+            failure_message = "Delivery is suppressed by EMAIL_TEST_MODE; enable SMTP delivery before retrying."
+            app.logger.warning("Student activation email delivery is suppressed by test mode.")
         except Exception as exc:
             # Do not log email addresses, tokens, SMTP responses, or other
             # delivery details that could reveal sensitive configuration.
-            app.logger.exception("Student activation email delivery failed")
+            app.logger.warning("Student activation email delivery failed.")
             retryable_failure = is_retryable_email_failure(exc)
 
         try:
@@ -1870,13 +1915,38 @@ def process_pending_activation_emails(limit=25):
                                 locked_at = NULL, last_error = NULL,
                                 failure_kind = NULL, next_attempt_at = NULL,
                                 updated_at = CURRENT_TIMESTAMP
-                            WHERE id = %s;
-                        """, (claimed["job_id"],))
-                        write_audit_event(cur, "STUDENT_ACTIVATION_EMAIL_SENT", {
-                            "account_id": claimed["account_id"],
-                            "student_id": claimed["student_id"],
-                            "job_id": claimed["job_id"],
-                        })
+                            WHERE id = %s
+                              AND status = 'PROCESSING'
+                              AND attempts = %s
+                            RETURNING id;
+                        """, (claimed["job_id"], claimed["attempts"]))
+                        if cur.fetchone():
+                            # An older invitation remains usable while a
+                            # replacement is still being delivered.  Retire it
+                            # only after SMTP accepts the replacement, leaving
+                            # exactly one active emailed invitation.
+                            token_hash = hashlib.sha256(
+                                claimed["token"].encode("utf-8")
+                            ).digest()
+                            cur.execute("""
+                                UPDATE student_activation_tokens
+                                SET used_at = CURRENT_TIMESTAMP
+                                WHERE account_id = %s
+                                  AND token_hash <> %s
+                                  AND used_at IS NULL;
+                            """, (claimed["account_id"], token_hash))
+                            write_audit_event(cur, "STUDENT_ACTIVATION_EMAIL_SENT", {
+                                "account_id": claimed["account_id"],
+                                "student_id": claimed["student_id"],
+                                "job_id": claimed["job_id"],
+                            })
+                        else:
+                            # A HOD retry or lease recovery has safely taken
+                            # ownership of this job.  Do not overwrite that
+                            # newer pending delivery state.
+                            app.logger.warning(
+                                "Activation email job changed while delivery was in progress."
+                            )
                     else:
                         token_hash = hashlib.sha256(
                             claimed["token"].encode("utf-8")
@@ -1913,7 +1983,7 @@ def process_pending_activation_emails(limit=25):
                             """, (
                                 "TEMPORARY_EXHAUSTED" if retryable_failure else "PERMANENT",
                                 "Delivery attempts exhausted; manual retry is required."
-                                if retryable_failure else "Permanent delivery failure; correct the recipient or provider configuration.",
+                                if retryable_failure else failure_message,
                                 claimed["job_id"],
                             ))
                         write_audit_event(cur, "STUDENT_ACTIVATION_EMAIL_RETRY_SCHEDULED" if automatic_retry else "STUDENT_ACTIVATION_EMAIL_FAILED", {
@@ -6261,6 +6331,14 @@ def resend_student_activation(student_id):
                     account_id,
                     reset_attempts=True,
                 )
+                if activation_job_id is None:
+                    return jsonify({
+                        "status": "error",
+                        "message": (
+                            "An activation invitation is already being delivered. "
+                            "Refresh the student status before retrying."
+                        ),
+                    }), 409
 
                 write_audit_event(
                     cur,
@@ -6278,6 +6356,8 @@ def resend_student_activation(student_id):
             "status": "ok",
             "message": "Student activation invitation queued for delivery.",
             "activation_email_queued": True,
+            "activation_email_status": "PENDING",
+            "activation_email_job_id": activation_job_id,
         }), 200
 
     except Exception:
@@ -6335,12 +6415,16 @@ def bulk_resend_student_activation():
                 eligible_ids = {row[0] for row in eligible_students}
 
                 queued = []
+                delivery_in_progress = []
                 for selected_student_id, account_id, usn in eligible_students:
                     job_id = queue_student_activation_email(
                         cur,
                         account_id,
                         reset_attempts=True,
                     )
+                    if job_id is None:
+                        delivery_in_progress.append(selected_student_id)
+                        continue
                     queued.append(selected_student_id)
                     write_audit_event(cur, "STUDENT_ACTIVATION_INVITATION_QUEUED", {
                         "student_id": selected_student_id,
@@ -6352,12 +6436,20 @@ def bulk_resend_student_activation():
 
         return jsonify({
             "status": "ok",
-            "message": f"{len(queued)} activation invitation(s) queued for delivery.",
+            "message": (
+                f"{len(queued)} activation invitation(s) queued for delivery. "
+                f"{len(delivery_in_progress)} already processing."
+            ),
             "queued_student_ids": queued,
+            "delivery_in_progress_student_ids": delivery_in_progress,
             "not_queued_student_ids": [
                 student_id for student_id in student_ids
                 if student_id not in eligible_ids
             ],
+            "activation_emails_queued": len(queued),
+            "activation_emails_pending": len(queued),
+            "activation_emails_sent": 0,
+            "activation_emails_failed": 0,
         }), 200
     except Exception:
         app.logger.exception("Bulk activation invitation queueing failed")
@@ -7270,6 +7362,7 @@ def import_hod_students_bulk():
             "rejected_count": len(rejected_rows),
             "rejected_rows": rejected_rows,
             "activation_emails_queued": len(imported_students),
+            "activation_emails_pending": len(imported_students),
             "activation_emails_sent": 0,
             "activation_emails_failed": 0,
             "branch": branch_name,

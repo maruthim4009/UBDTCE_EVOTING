@@ -674,7 +674,9 @@ async function handleConfirmImport() {
     setImportMessage(
       `Registration summary — submitted: ${data.submitted_count}; ` +
       `registered: ${data.registered_students}; conflicts: ${data.rejected_count}; ` +
-      `invitations queued: ${data.activation_emails_queued}.`
+      `invitations queued: ${data.activation_emails_queued}; ` +
+      `pending delivery: ${data.activation_emails_pending ?? data.activation_emails_queued}; ` +
+      `sent: ${data.activation_emails_sent ?? 0}; failed: ${data.activation_emails_failed ?? 0}.`
     );
     await loadStudents();
 

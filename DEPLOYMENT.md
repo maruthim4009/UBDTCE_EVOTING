@@ -1,7 +1,8 @@
 # Deployment and Operations
 
 This project uses a Flask API, PostgreSQL, and a Vite/React frontend. Keep the
-existing `backend/.env` in place; do not commit it or replace its values.
+existing repository-root `.env` in place; do not commit it or replace its
+values. Both the API and email worker load the repository-root file.
 
 ## Windows development
 
@@ -9,7 +10,7 @@ From the project root, start the API:
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe app.py
+..\.venv\Scripts\python.exe app.py
 ```
 
 In a second terminal, start the frontend:
@@ -51,7 +52,7 @@ WSGI application with Waitress on Windows:
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m waitress --listen=127.0.0.1:5000 wsgi:app
+..\.venv\Scripts\python.exe -m waitress --listen=127.0.0.1:5000 wsgi:app
 ```
 
 Place a TLS-terminating reverse proxy in front of Waitress. In production,
@@ -79,20 +80,24 @@ scheduled task). It processes only queued jobs and never prints recipients or
 activation links:
 
 ```powershell
-.\.venv\Scripts\python.exe email_worker.py --limit 25
+..\.venv\Scripts\python.exe email_worker.py --limit 25
 ```
 
 For a single bounded worker process that continually picks up invitations,
 run it under a service manager or scheduled-task wrapper:
 
 ```powershell
-.\.venv\Scripts\python.exe email_worker.py --watch --limit 25 --interval-seconds 30
+..\.venv\Scripts\python.exe email_worker.py --watch --limit 25 --interval-seconds 30
 ```
 
+The API process never starts this worker. Keep one or more `--watch` processes
+running under a Windows service manager or Scheduled Task configured to restart
+on failure; `FOR UPDATE SKIP LOCKED` permits concurrent worker processes.
 Do not run the worker for a bulk invitation campaign until an authorized
 administrator has approved the recipients and the configured mail service has
-been verified. Failed jobs remain recoverable through the HOD resend/retry
-controls.
+been verified. `EMAIL_TEST_MODE` must be false, and `STUDENT_ACTIVATION_URL`
+must be the public HTTPS `/student-activate` route. Failed jobs remain
+recoverable through the HOD resend/retry controls.
 
 ## Backups and release hygiene
 
