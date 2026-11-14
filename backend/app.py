@@ -11,7 +11,7 @@ from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
 from html import escape
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import csv
 import io
 import re
@@ -1496,28 +1496,19 @@ def verify_student_activation_otp():
 # STUDENT ACCOUNT ACTIVATION EMAIL
 # ==========================================
 
-STUDENT_ACTIVATION_URL = os.getenv(
-    "STUDENT_ACTIVATION_URL",
-    "http://localhost:5173/student-activate"
-)
-
-
 def create_student_activation_token(cur, account_id):
-    """Create a one-time, 24-hour student activation token."""
+    """Create a one-time, 24-hour student activation token.
+
+    Existing usable tokens remain valid until SMTP accepts a replacement
+    invitation. This prevents a transient delivery failure from invalidating
+    the only link a student can currently use.
+    """
 
     token = secrets.token_urlsafe(32)
 
     token_hash = hashlib.sha256(
         token.encode("utf-8")
     ).digest()
-
-    # Invalidate earlier unused activation links.
-    cur.execute("""
-        UPDATE student_activation_tokens
-        SET used_at = CURRENT_TIMESTAMP
-        WHERE account_id = %s
-          AND used_at IS NULL;
-    """, (account_id,))
 
     cur.execute("""
         INSERT INTO student_activation_tokens (
@@ -1535,13 +1526,45 @@ def create_student_activation_token(cur, account_id):
     return token
 
 
+def student_activation_link(token):
+    """Build the configured public student-activation link safely."""
+    if not isinstance(token, str) or not token:
+        raise ValueError("Activation token is invalid.")
+
+    configured_url = os.getenv("STUDENT_ACTIVATION_URL", "").strip()
+    parsed = urlsplit(configured_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.fragment
+        or parsed.path.rstrip("/") != "/student-activate"
+    ):
+        raise RuntimeError(
+            "STUDENT_ACTIVATION_URL must be an absolute frontend /student-activate URL."
+        )
+
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key != "token"
+    ]
+    query.append(("token", token))
+    return urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        urlencode(query),
+        "",
+    ))
+
+
 def send_student_activation_email(email, student_name, usn, token):
     """Send a professional student account activation invitation."""
 
-    activation_link = (
-        f"{STUDENT_ACTIVATION_URL}"
-        f"?{urlencode({'token': token})}"
-    )
+    if not valid_email_address(email):
+        raise ValueError("Student activation recipient is invalid.")
+
+    activation_link = student_activation_link(token)
 
     safe_name = escape(student_name)
     safe_usn = escape(usn)
