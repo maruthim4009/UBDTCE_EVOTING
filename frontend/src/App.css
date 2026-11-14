@@ -6662,6 +6662,54 @@ a:focus-visible {
   border-top: 1px solid #e2e8f0;
 }
 
+.principal-cr-shortlist {
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid #d9e5f3;
+  border-radius: 10px;
+  background: #f4f8fc;
+}
+
+.principal-cr-shortlist h4 {
+  margin: 0 0 6px;
+  color: #142d4e;
+}
+
+.principal-cr-shortlist p {
+  margin: 0;
+  color: #64748b;
+}
+
+.principal-cr-shortlist-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.principal-cr-shortlist-grid button {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #263449;
+  text-align: left;
+  cursor: pointer;
+}
+
+.principal-cr-shortlist-grid button:hover,
+.principal-cr-shortlist-grid button.selected {
+  border-color: #315d91;
+  background: #eaf2fb;
+}
+
+.principal-cr-shortlist-grid span,
+.principal-cr-shortlist-grid small {
+  color: #64748b;
+}
+
 .principal-election-result {
   padding: 16px;
   border: 1px solid #d9e5f3;

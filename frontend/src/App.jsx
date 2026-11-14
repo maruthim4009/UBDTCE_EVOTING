@@ -59,6 +59,8 @@ const collegeElectionTypeOptions = [
   { value: "OTHER", label: "Other representative position", candidateRule: "Candidates are active students in the selected branches and cohort." },
 ];
 
+const ACADEMIC_YEARS = Array.from({ length: 27 }, (_, index) => 2022 + index);
+
 function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [selectedRole, setSelectedRole] = useState(() => {
@@ -2605,27 +2607,29 @@ const registeredBranchCount = dashboardBranches.length;
                         </div>
                         <div className="principal-election-field">
                           <label htmlFor="presidentAdmissionYear">Admission year (optional)</label>
-                          <input
+                          <select
                             id="presidentAdmissionYear"
-                            type="number"
-                            min="2000"
-                            max="2100"
                             value={presidentAdmissionYear}
                             onChange={(event) => setPresidentAdmissionYear(event.target.value)}
-                            placeholder="All student cohorts"
-                          />
+                          >
+                            <option value="">All student cohorts</option>
+                            {ACADEMIC_YEARS.map((year) => (
+                              <option key={year} value={year}>{year}</option>
+                            ))}
+                          </select>
                         </div>
                         <div className="principal-election-field">
                           <label htmlFor="presidentAcademicYear">Academic year (optional)</label>
-                          <input
+                          <select
                             id="presidentAcademicYear"
-                            type="number"
-                            min="2000"
-                            max="2100"
                             value={presidentAcademicYear}
                             onChange={(event) => setPresidentAcademicYear(event.target.value)}
-                            placeholder="e.g. 2026"
-                          />
+                          >
+                            <option value="">All academic years</option>
+                            {ACADEMIC_YEARS.map((year) => (
+                              <option key={year} value={year}>{year}</option>
+                            ))}
+                          </select>
                         </div>
                         <div className="principal-election-field">
                           <label htmlFor="presidentSemester">Semester (optional)</label>
@@ -2790,6 +2794,36 @@ const registeredBranchCount = dashboardBranches.length;
                             Candidates{selectedElection ? ` — ${selectedElection.title}` : ""}
                           </h3>
                           {selectedElection?.status === "DRAFT" && (
+                            <>
+                            {selectedElection.candidate_eligibility === "CR_WINNER" && (
+                              <section className="principal-cr-shortlist" aria-labelledby="principal-cr-shortlist-title">
+                                <div>
+                                  <h4 id="principal-cr-shortlist-title">Elected CRs in selected branches</h4>
+                                  <p>Select an elected CR to fill the candidate field. Their closed CR-election symbol is shown for identification; choose a unique symbol for this President election below.</p>
+                                </div>
+                                {eligiblePrincipalCandidates.length === 0 ? (
+                                  <p className="principal-election-eligibility-note">No elected CR matches this election’s selected branches and cohort yet.</p>
+                                ) : (
+                                  <div className="principal-cr-shortlist-grid">
+                                    {eligiblePrincipalCandidates.map((candidate) => (
+                                      <button
+                                        key={`${candidate.branch}-${candidate.usn}`}
+                                        type="button"
+                                        className={principalCandidateUsn === candidate.usn ? "selected" : ""}
+                                        onClick={() => setPrincipalCandidateUsn(candidate.usn)}
+                                      >
+                                        <strong>{candidate.name}</strong>
+                                        <span>{candidate.usn} · {candidate.branch}</span>
+                                        <small>
+                                          {candidate.representative_symbol?.glyph || "◌"}
+                                          {" "}{candidate.representative_symbol?.label || "CR symbol not recorded"}
+                                        </small>
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </section>
+                            )}
                             <form className="principal-election-form" onSubmit={handlePrincipalCandidateSubmit}>
                               <div className="principal-election-fields">
                                 <div className="principal-election-field">
@@ -2805,7 +2839,7 @@ const registeredBranchCount = dashboardBranches.length;
                                     required
                                   />
                                   <datalist id="principalEligibleCandidateUsns">
-                                    {eligiblePrincipalCandidates.map((candidate) => <option key={`${candidate.branch}-${candidate.usn}`} value={candidate.usn}>{candidate.branch}</option>)}
+                                    {eligiblePrincipalCandidates.map((candidate) => <option key={`${candidate.branch}-${candidate.usn}`} value={candidate.usn}>{candidate.name} · {candidate.branch}</option>)}
                                   </datalist>
                                 </div>
                                 <div className="principal-election-field">
@@ -2832,6 +2866,7 @@ const registeredBranchCount = dashboardBranches.length;
                               <p className="principal-election-eligibility-note">{selectedElection?.candidate_eligibility_label || "Only students eligible under this election's policy are available."} {eligiblePrincipalCandidates.length} eligible candidate(s) found.</p>
                               <button type="submit" className="principal-primary-button" disabled={!candidateSymbols.length}>Register candidate</button>
                             </form>
+                            </>
                           )}
 
                           {principalCandidates.length === 0 ? (

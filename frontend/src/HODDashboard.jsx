@@ -7,8 +7,10 @@ const ROOT_API_BASE = (
 ).replace(/\/+$/, "");
 const API_BASE = `${ROOT_API_BASE}/hod`;
 
-const admissionYears = Array.from({ length: 101 }, (_, index) => 2000 + index);
-const defaultAdmissionYear = String(new Date().getFullYear());
+const admissionYears = Array.from({ length: 27 }, (_, index) => 2022 + index);
+const defaultAdmissionYear = String(
+  Math.min(2048, Math.max(2022, new Date().getFullYear()))
+);
 
 const semesters = [1, 2, 3, 4, 5, 6, 7, 8];
 
@@ -129,18 +131,6 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
 
   return yearMatches && academicYearMatches && semesterMatches;
 });
-  const classAdmissionYears = useMemo(
-    () => [...new Set(classes
-      .map((classItem) => classItem.admission_year)
-      .filter((year) => year != null))].sort((left, right) => right - left),
-    [classes]
-  );
-  const classAcademicYears = useMemo(
-    () => [...new Set(classes
-      .map((classItem) => classItem.academic_year)
-      .filter((year) => year != null))].sort((left, right) => right - left),
-    [classes]
-  );
   const classSemesters = useMemo(
     () => [...new Set(classes
       .map((classItem) => classItem.semester)
@@ -1486,7 +1476,7 @@ async function handleConfirmImport() {
                     >
                       <option value="">All Admission Years</option>
 
-                      {classAdmissionYears.map((year) => (
+                      {admissionYears.map((year) => (
                         <option key={year} value={year}>
                           {year}
                         </option>
@@ -1505,7 +1495,7 @@ async function handleConfirmImport() {
                       }}
                     >
                       <option value="">All Academic Years</option>
-                      {classAcademicYears.map((year) => (
+                      {admissionYears.map((year) => (
                         <option key={year} value={year}>{year}</option>
                       ))}
                       {hasStudentsWithoutAcademicYear && (
@@ -1762,7 +1752,7 @@ async function handleConfirmImport() {
       >
         <option value="">Select admission year</option>
 
-        {classAdmissionYears.map((year) => (
+        {admissionYears.map((year) => (
           <option key={year} value={year}>
             {year}
           </option>
@@ -1781,7 +1771,7 @@ async function handleConfirmImport() {
       >
         <option value="">Select academic year</option>
 
-        {classAcademicYears.map((year) => (
+        {admissionYears.map((year) => (
           <option key={year} value={year}>
             {year}
           </option>
