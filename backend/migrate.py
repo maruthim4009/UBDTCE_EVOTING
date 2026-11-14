@@ -28,6 +28,7 @@ MIGRATION_LOCK_KEY = "ubdtce-secure-schema-migrations-v1"
 class Migration:
     version: str
     filename: str
+    mode: str = "self_managed"
 
     @property
     def path(self) -> Path:
@@ -46,7 +47,8 @@ MIGRATIONS = (
     Migration("003_hod_management", "hod_management_migration.sql"),
     Migration("004_academic_year_eligibility", "academic_year_eligibility_migration.sql"),
     Migration("005_integrity_symbols_outbox", "integrity_symbols_outbox_migration.sql"),
-    Migration("006_performance_indexes", "performance_indexes_migration.sql"),
+    Migration("006_performance_indexes", "performance_indexes_migration.sql", "nontransactional"),
+    Migration("007_college_election_categories", "college_election_categories_migration.sql", "transactional"),
 )
 
 
@@ -77,15 +79,23 @@ def pending_migrations(applied: dict[str, str]) -> Iterable[Migration]:
         )
 
     pending = []
+    missing_predecessor = None
     for migration in MIGRATIONS:
         checksum = migration.checksum
         recorded_checksum = applied.get(migration.version)
         if recorded_checksum is None:
+            if missing_predecessor is None:
+                missing_predecessor = migration.version
             pending.append(migration)
         elif recorded_checksum != checksum:
             raise RuntimeError(
                 f"Checksum mismatch for {migration.version}. The applied SQL file was changed; "
                 "stop and review the database before creating a new migration."
+            )
+        elif missing_predecessor is not None:
+            raise RuntimeError(
+                f"Migration history is out of order: {migration.version} is recorded, "
+                f"but required predecessor {missing_predecessor} is missing."
             )
     return pending
 
@@ -127,17 +137,31 @@ def apply_migrations(cur, expected_database: str) -> None:
 
     for migration in pending:
         print(f"Applying {migration.version}: {migration.filename}")
-        # Migration files are repository-owned and contain no user input.
-        # Autocommit is required for the final concurrent-index migration;
-        # all other migration files declare their own BEGIN/COMMIT block.
-        cur.execute(migration.path.read_text(encoding="utf-8"))
-        cur.execute(
-            """
-            INSERT INTO schema_migrations (version, checksum)
-            VALUES (%s, %s);
-            """,
-            (migration.version, migration.checksum),
-        )
+        sql = migration.path.read_text(encoding="utf-8")
+        if migration.mode == "transactional":
+            # Keep new schema changes and their ledger record atomic. These
+            # files must not contain BEGIN/COMMIT of their own.
+            cur.execute("BEGIN;")
+            try:
+                cur.execute(sql)
+                cur.execute(
+                    "INSERT INTO schema_migrations (version, checksum) VALUES (%s, %s);",
+                    (migration.version, migration.checksum),
+                )
+                cur.execute("COMMIT;")
+            except Exception:
+                cur.execute("ROLLBACK;")
+                raise
+        else:
+            # Legacy files retain their own transaction boundaries for
+            # checksum compatibility; concurrent indexes require autocommit.
+            # Both types are idempotent, so recovery after an interruption
+            # before ledger insertion is a forward-only rerun.
+            cur.execute(sql)
+            cur.execute(
+                "INSERT INTO schema_migrations (version, checksum) VALUES (%s, %s);",
+                (migration.version, migration.checksum),
+            )
         print(f"Applied {migration.version}.")
 
 

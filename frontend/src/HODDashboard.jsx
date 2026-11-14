@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./HODDashboard.css";
 
 const ROOT_API_BASE = (
@@ -39,6 +39,7 @@ export default function HODDashboard({ currentUser, onLogout }) {
   const [filterAcademicYear, setFilterAcademicYear] = useState("");
   const [filterSemester, setFilterSemester] = useState("");
   const [selectedStudents, setSelectedStudents] = useState([]);
+  const [selectedStudentDetails, setSelectedStudentDetails] = useState({});
   const [studentPage, setStudentPage] = useState(1);
   const [studentPagination, setStudentPagination] = useState(null);
 
@@ -52,6 +53,7 @@ export default function HODDashboard({ currentUser, onLogout }) {
   });
 
   const [studentSubmitting, setStudentSubmitting] = useState(false);
+  const [studentActionBusy, setStudentActionBusy] = useState(false);
   const [classes, setClasses] = useState([]);
   
 const [classesBranch, setClassesBranch] = useState("");
@@ -83,6 +85,21 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
   const [candidateSymbols, setCandidateSymbols] = useState([]);
   const [candidateSymbolKey, setCandidateSymbolKey] = useState("book");
   const [result, setResult] = useState(null);
+  const [electionActionKey, setElectionActionKey] = useState("");
+  const transientTimerIds = useRef(new Set());
+
+  function clearMessageAfter(setter, delay) {
+    const timerId = window.setTimeout(() => {
+      transientTimerIds.current.delete(timerId);
+      setter("");
+    }, delay);
+    transientTimerIds.current.add(timerId);
+  }
+
+  useEffect(() => () => {
+    transientTimerIds.current.forEach((timerId) => window.clearTimeout(timerId));
+    transientTimerIds.current.clear();
+  }, []);
 
   const menuItems = [
     { id: "overview", icon: "▦", label: "Overview" },
@@ -152,7 +169,7 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
     );
 
   const selectedUnactivatedStudentIds = selectedStudents.filter((studentId) => {
-    const student = students.find((item) => item.id === studentId);
+    const student = selectedStudentDetails[studentId];
     return student?.is_active && !student?.is_activated;
   });
 
@@ -183,7 +200,7 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
     return () => { cancelled = true; };
   }, []);
 
-  async function loadStudents() {
+  async function loadStudents(signal) {
   setStudentLoading(true);
   setStudentListError("");
 
@@ -213,6 +230,7 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
       {
         method: "GET",
         credentials: "include",
+        signal,
         headers: {
           "X-Requested-With": "XMLHttpRequest",
         },
@@ -221,26 +239,40 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
 
     const data = await readResponse(response);
 
+    if (signal?.aborted) return;
     setStudents(data.students || []);
     setStudentPagination(data.pagination || null);
-    setSelectedStudents([]);
+    setSelectedStudentDetails((previous) => {
+      const next = { ...previous };
+      (data.students || []).forEach((student) => {
+        next[student.id] = {
+          is_active: student.is_active,
+          is_activated: student.is_activated,
+        };
+      });
+      return next;
+    });
   } catch (error) {
+    if (error.name === "AbortError" || signal?.aborted) return;
     setStudentListError(
       error.message === "Failed to fetch"
         ? "Cannot connect to Flask. Check that the backend is running."
         : error.message
     );
   } finally {
-    setStudentLoading(false);
+    if (!signal?.aborted) setStudentLoading(false);
   }
 }
 
   useEffect(() => {
     if (activePage === "students") {
+      const controller = new AbortController();
       // Fetching starts an asynchronous state update; it is not a synchronous effect update.
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      loadStudents();
+      void loadStudents(controller.signal);
+      return () => controller.abort();
     }
+    return undefined;
     // loadStudents intentionally uses the listed query values.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePage, studentSearch, filterSemester, filterYear, filterAcademicYear, studentPage]);
@@ -310,6 +342,8 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
 
   async function handleCreateElection(event) {
     event.preventDefault();
+    if (electionActionKey) return;
+    setElectionActionKey("create");
     setElectionError("");
     setElectionMessage("");
     try {
@@ -330,15 +364,19 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
       await loadHodElections();
     } catch (error) {
       setElectionError(error.message || "Could not create the election.");
+    } finally {
+      setElectionActionKey("");
     }
   }
 
   async function handleCandidateSubmit(event) {
     event.preventDefault();
+    if (electionActionKey) return;
     if (!selectedElectionId) {
       setElectionError("Select an election first.");
       return;
     }
+    setElectionActionKey("candidate-create");
     setElectionError("");
     try {
       const data = await readResponse(await fetch(`${API_BASE}/elections/${selectedElectionId}/candidates`, {
@@ -358,11 +396,15 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
       await loadCandidates(selectedElectionId);
     } catch (error) {
       setElectionError(error.message || "Could not register candidate.");
+    } finally {
+      setElectionActionKey("");
     }
   }
 
   async function reviewCandidate(candidateId, action) {
     if (!selectedElectionId) return;
+    if (electionActionKey) return;
+    setElectionActionKey(`candidate-${candidateId}`);
     setElectionError("");
     try {
       const data = await readResponse(await fetch(`${API_BASE}/elections/${selectedElectionId}/candidates/${candidateId}/${action}`, {
@@ -375,10 +417,14 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
       await loadHodElections();
     } catch (error) {
       setElectionError(error.message || "Could not review candidate.");
+    } finally {
+      setElectionActionKey("");
     }
   }
 
   async function changeElectionStatus(electionId, action) {
+    if (electionActionKey) return;
+    setElectionActionKey(`election-${electionId}-${action}`);
     setElectionError("");
     try {
       const data = await readResponse(await fetch(`${API_BASE}/elections/${electionId}/${action}`, {
@@ -390,6 +436,8 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
       await loadHodElections();
     } catch (error) {
       setElectionError(error.message || "Could not update election status.");
+    } finally {
+      setElectionActionKey("");
     }
   }
 
@@ -454,9 +502,7 @@ const [classSemesterFilter, setClassSemesterFilter] = useState("");
   data.message || "Student registered successfully."
 );
 
-window.setTimeout(() => {
-  setIndividualAddMessage("");
-}, 10000);
+      clearMessageAfter(setIndividualAddMessage, 10000);
 
       setStudentForm({
         name: "",
@@ -617,9 +663,7 @@ async function handleConfirmImport() {
     );
     await loadStudents();
 
-window.setTimeout(() => {
-  setImportMessage("");
-}, 5000);
+      clearMessageAfter(setImportMessage, 5000);
   } catch (error) {
     setImportMessage(error.message || "Unable to import students.");
   } finally {
@@ -628,6 +672,7 @@ window.setTimeout(() => {
 }
 
  async function handleSingleStatusChange(student, nextStatus) {
+  if (studentActionBusy) return;
   const action = nextStatus ? "activate" : "deactivate";
 
   const confirmed = window.confirm(
@@ -638,6 +683,7 @@ window.setTimeout(() => {
 
   setStudentMessage("");
   setStudentListError("");
+  setStudentActionBusy(true);
 
   try {
     const response = await fetch(
@@ -666,20 +712,25 @@ window.setTimeout(() => {
           : item
       )
     );
+    setSelectedStudentDetails((previous) => ({
+      ...previous,
+      [student.id]: { ...previous[student.id], is_active: data.is_active },
+    }));
 
    setStudentMessage(data.message);
 
-window.setTimeout(() => {
-  setStudentMessage("");
-}, 10000);
+    clearMessageAfter(setStudentMessage, 10000);
 
 
   } catch (error) {
     setStudentListError(error.message);
+  } finally {
+    setStudentActionBusy(false);
   }
 }
 
   async function handleBulkStatusChange(nextStatus) {
+  if (studentActionBusy) return;
   if (selectedStudents.length === 0) {
     setStudentMessage("Select students first.");
     return;
@@ -695,6 +746,7 @@ window.setTimeout(() => {
 
   setStudentMessage("");
   setStudentListError("");
+  setStudentActionBusy(true);
 
   try {
     const response = await fetch(
@@ -731,6 +783,8 @@ window.setTimeout(() => {
     setStudentMessage(data.message);
   } catch (error) {
     setStudentListError(error.message);
+  } finally {
+    setStudentActionBusy(false);
   }
 }
 
@@ -768,7 +822,8 @@ window.setTimeout(() => {
   }
 
   async function handleResendActivation(studentIds) {
-    if (!studentIds.length) return;
+    if (!studentIds.length || studentActionBusy) return;
+    setStudentActionBusy(true);
     try {
       const endpoint = studentIds.length === 1
         ? `${API_BASE}/students/${studentIds[0]}/resend-activation`
@@ -788,6 +843,8 @@ window.setTimeout(() => {
       await loadStudents();
     } catch (error) {
       setStudentListError(error.message || "Could not queue activation invitations.");
+    } finally {
+      setStudentActionBusy(false);
     }
   }
 
@@ -1482,22 +1539,25 @@ window.setTimeout(() => {
                       <button
                         type="button"
                         className="hod-activate-button"
+                        disabled={studentActionBusy}
                         onClick={() => handleBulkStatusChange(true)}
                       >
-                        Activate selected
+                        {studentActionBusy ? "Updating…" : "Activate selected"}
                       </button>
 
                       <button
                         type="button"
                         className="hod-deactivate-button"
+                        disabled={studentActionBusy}
                         onClick={() => handleBulkStatusChange(false)}
                       >
-                        Deactivate selected
+                        {studentActionBusy ? "Updating…" : "Deactivate selected"}
                       </button>
 
                       {selectedUnactivatedStudentIds.length > 0 && <button
                         type="button"
                         className="hod-primary-button"
+                        disabled={studentActionBusy}
                         onClick={() => handleResendActivation(selectedUnactivatedStudentIds)}
                       >
                         Queue pending invitations
@@ -1585,6 +1645,7 @@ window.setTimeout(() => {
                             <td>
                               <button
                                 type="button"
+                                disabled={studentActionBusy}
                                 className={
                                   student.is_active
                                     ? "hod-deactivate-button"
@@ -1605,6 +1666,7 @@ window.setTimeout(() => {
                               {student.is_active && !student.is_activated && (
                                 <button
                                   type="button"
+                                disabled={studentActionBusy}
                                   onClick={() => handleResendActivation([student.id])}
                                 >
                                   {student.activation_email_status === "FAILED"
@@ -1835,7 +1897,7 @@ window.setTimeout(() => {
             <label>Semester<select value={electionForm.semester} onChange={(event) => setElectionForm((previous) => ({ ...previous, semester: event.target.value }))} required><option value="">Select semester</option>{semesters.map((semester) => <option key={semester} value={semester}>Semester {semester}</option>)}</select></label>
             <label>Voting minutes<input type="number" min="1" max="10080" value={electionForm.duration_minutes} onChange={(event) => setElectionForm((previous) => ({ ...previous, duration_minutes: event.target.value }))} required /></label>
           </div>
-          <button type="submit">Create draft <span aria-hidden="true">→</span></button>
+          <button type="submit" disabled={Boolean(electionActionKey)}>{electionActionKey === "create" ? "Creating…" : "Create draft"} <span aria-hidden="true">→</span></button>
         </form>
       </aside>
       <section className="hod-election-list-panel">
@@ -1846,7 +1908,7 @@ window.setTimeout(() => {
           <p className="hod-election-cohort">{election.admission_year} · Semester {election.semester}</p>
           <p className="hod-election-description">{election.description || "No additional description provided."}</p>
           <div className="hod-election-metrics"><div><strong>{election.eligible_voters}</strong><span>eligible voters</span></div><div><strong>{election.approved_candidates}</strong><span>approved candidates</span></div><div><strong>{election.duration_minutes}</strong><span>minutes</span></div></div>
-          <div className="hod-election-actions">{election.status === "DRAFT" && <><button type="button" className="edit" onClick={() => handleEditElection(election)}>Edit</button><button type="button" className="start" onClick={() => changeElectionStatus(election.id, "start")}>Start voting</button></>}{election.status === "OPEN" && <button type="button" className="close" onClick={() => changeElectionStatus(election.id, "close")}>Close voting</button>}{election.status === "CLOSED" && <button type="button" className="results" onClick={() => { setActivePage("results"); loadResult(election.id); }}>View results</button>}</div>
+          <div className="hod-election-actions">{election.status === "DRAFT" && <><button type="button" className="edit" disabled={Boolean(electionActionKey)} onClick={() => handleEditElection(election)}>Edit</button><button type="button" className="start" disabled={Boolean(electionActionKey)} onClick={() => changeElectionStatus(election.id, "start")}>{electionActionKey === `election-${election.id}-start` ? "Starting…" : "Start voting"}</button></>}{election.status === "OPEN" && <button type="button" className="close" disabled={Boolean(electionActionKey)} onClick={() => changeElectionStatus(election.id, "close")}>{electionActionKey === `election-${election.id}-close` ? "Closing…" : "Close voting"}</button>}{election.status === "CLOSED" && <button type="button" className="results" onClick={() => { setActivePage("results"); loadResult(election.id); }}>View results</button>}</div>
         </article>)}</div>}
       </section>
     </div>
@@ -1897,7 +1959,7 @@ window.setTimeout(() => {
             Manifesto <span>Optional</span>
             <textarea value={candidateManifesto} onChange={(event) => setCandidateManifesto(event.target.value)} maxLength="5000" rows="4" placeholder="Brief candidate statement" />
           </label>
-          <button className="hod-candidate-submit" type="submit" disabled={!selectedElectionId || !candidateSymbols.length}>Register candidate <span aria-hidden="true">→</span></button>
+          <button className="hod-candidate-submit" type="submit" disabled={!selectedElectionId || !candidateSymbols.length || Boolean(electionActionKey)}>{electionActionKey === "candidate-create" ? "Registering…" : "Register candidate"} <span aria-hidden="true">→</span></button>
         </form>
       </aside>
 
@@ -1922,7 +1984,7 @@ window.setTimeout(() => {
             <p className="hod-candidate-usn">USN · {candidate.usn}</p>
             <p className="hod-candidate-symbol-label">{candidate.symbol?.label || "Symbol pending"}</p>
             <p className="hod-candidate-manifesto">{candidate.manifesto || "No manifesto submitted."}</p>
-            {reviewStatus === "PENDING" || !candidate.is_approved ? <div className="hod-candidate-actions"><button type="button" className="approve" onClick={() => reviewCandidate(candidate.id, "approve")}>Approve</button><button type="button" className="reject" onClick={() => reviewCandidate(candidate.id, "reject")}>Reject</button></div> : <div className="hod-candidate-reviewed">Reviewed and locked for this draft</div>}
+            {reviewStatus === "PENDING" || !candidate.is_approved ? <div className="hod-candidate-actions"><button type="button" className="approve" disabled={Boolean(electionActionKey)} onClick={() => reviewCandidate(candidate.id, "approve")}>{electionActionKey === `candidate-${candidate.id}` ? "Saving…" : "Approve"}</button><button type="button" className="reject" disabled={Boolean(electionActionKey)} onClick={() => reviewCandidate(candidate.id, "reject")}>Reject</button></div> : <div className="hod-candidate-reviewed">Reviewed and locked for this draft</div>}
           </article>;
         })}</div>}
       </section>

@@ -21,6 +21,7 @@ if str(BACKEND_DIR) not in sys.path:
 from app import (
     app,
     CANDIDATE_SYMBOLS,
+    COLLEGE_ELECTION_POLICIES,
     compute_audit_event_hash,
     compute_election_result_commitment,
     is_retryable_email_failure,
@@ -30,7 +31,9 @@ from app import (
     send_student_activation_email,
     valid_email_address,
     create_principal_election,
+    cast_student_vote,
     import_hod_students_bulk,
+    _principal_eligible_candidates,
 )
 
 
@@ -195,6 +198,29 @@ class AuthorizationAndBallotContractTests(unittest.TestCase):
         self.assertNotIn("AND s.is_cr = TRUE", source)
         self.assertIn("the CR-winner rule applies to candidates, not to voters", source)
 
+    def test_college_candidate_policy_is_enforced_server_side(self):
+        self.assertEqual(
+            COLLEGE_ELECTION_POLICIES["PRESIDENT"]["winner_types"], ("CR",)
+        )
+        self.assertEqual(
+            COLLEGE_ELECTION_POLICIES["JOINT_SECRETARY"]["winner_types"], ("CR", "FR")
+        )
+        self.assertEqual(
+            COLLEGE_ELECTION_POLICIES["CULTURAL"]["winner_types"], ()
+        )
+        source = inspect.getsource(_principal_eligible_candidates)
+        self.assertIn("cardinality(%s::text[]) = 0", source)
+        self.assertIn("branch_election.election_type = ANY(%s::text[])", source)
+        self.assertIn("branch_election.status = 'CLOSED'", source)
+
+    def test_vote_transaction_rechecks_state_and_audits_without_voter_identity(self):
+        source = inspect.getsource(cast_student_vote)
+        self.assertIn("FOR SHARE OF s, a, b", source)
+        self.assertIn('write_audit_event(cur, "VOTE_RECORDED"', source)
+        vote_audit_segment = source.split('write_audit_event(cur, "VOTE_RECORDED"', 1)[1]
+        self.assertNotIn("student_id", vote_audit_segment.split("}, election_id)", 1)[0])
+        self.assertNotIn("candidate_id", vote_audit_segment.split("}, election_id)", 1)[0])
+
     def test_bulk_import_uses_row_savepoints_for_partial_duplicate_recovery(self):
         source = inspect.getsource(import_hod_students_bulk)
         self.assertIn("SAVEPOINT", source)
@@ -244,11 +270,29 @@ class AuthorizationAndBallotContractTests(unittest.TestCase):
                 "004_academic_year_eligibility",
                 "005_integrity_symbols_outbox",
                 "006_performance_indexes",
+                "007_college_election_categories",
             ],
         )
         self.assertEqual(list(pending_migrations({})), list(MIGRATIONS))
         with self.assertRaises(RuntimeError):
             list(pending_migrations({"001_voting_reliability": "incorrect"}))
+        with self.assertRaises(RuntimeError):
+            list(pending_migrations({
+                "001_voting_reliability": MIGRATIONS[0].checksum,
+                "003_hod_management": MIGRATIONS[2].checksum,
+            }))
+
+    def test_schema_supports_college_election_position_names(self):
+        schema = (Path(__file__).resolve().parents[1] / "schema.sql").read_text(
+            encoding="utf-8"
+        )
+        migration = (
+            Path(__file__).resolve().parents[1]
+            / "college_election_categories_migration.sql"
+        ).read_text(encoding="utf-8")
+        self.assertIn("position_name VARCHAR(120)", schema)
+        self.assertIn("'JOINT_SECRETARY'", schema)
+        self.assertIn("ADD COLUMN IF NOT EXISTS position_name", migration)
 
 
 if __name__ == "__main__":

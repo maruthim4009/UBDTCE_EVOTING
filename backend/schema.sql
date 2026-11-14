@@ -70,10 +70,11 @@ CREATE TABLE elections (
     description TEXT NOT NULL DEFAULT '',
     election_type VARCHAR(30) NOT NULL
         CHECK (election_type IN (
-            'CR', 'FR', 'PRESIDENT', 'TECHNICAL',
+            'CR', 'FR', 'PRESIDENT', 'JOINT_SECRETARY', 'TECHNICAL',
             'VICE_PRESIDENT', 'CULTURAL', 'SPORTS', 'OTHER'
         )),
     branch_id BIGINT REFERENCES branches(id),
+    position_name VARCHAR(120),
     admission_year SMALLINT CHECK (admission_year BETWEEN 2000 AND 2100),
     academic_year SMALLINT CHECK (academic_year BETWEEN 2000 AND 2100),
     semester SMALLINT CHECK (semester BETWEEN 1 AND 12),

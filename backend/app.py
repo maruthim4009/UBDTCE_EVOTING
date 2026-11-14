@@ -108,6 +108,43 @@ CANDIDATE_SYMBOLS = (
 )
 CANDIDATE_SYMBOL_BY_KEY = {symbol["key"]: symbol for symbol in CANDIDATE_SYMBOLS}
 
+# College-level elections are independently managed. Candidate eligibility is
+# deliberately explicit: the database has authoritative CR/FR election
+# results, but no verified cultural or sporting achievement records.
+COLLEGE_ELECTION_POLICIES = {
+    "PRESIDENT": {
+        "label": "College President",
+        "eligibility": "CR_WINNER",
+        "eligibility_label": "Verified winners of completed CR elections",
+        "winner_types": ("CR",),
+    },
+    "JOINT_SECRETARY": {
+        "label": "Joint Secretary",
+        "eligibility": "REPRESENTATIVE_WINNER",
+        "eligibility_label": "Verified winners of completed CR or FR elections",
+        "winner_types": ("CR", "FR"),
+    },
+    "CULTURAL": {
+        "label": "Cultural President",
+        "eligibility": "ACTIVE_STUDENT",
+        "eligibility_label": "Active students in the selected branches and cohort",
+        "winner_types": (),
+    },
+    "SPORTS": {
+        "label": "Sports President",
+        "eligibility": "ACTIVE_STUDENT",
+        "eligibility_label": "Active students in the selected branches and cohort",
+        "winner_types": (),
+    },
+    "OTHER": {
+        "label": "Other college representative position",
+        "eligibility": "ACTIVE_STUDENT",
+        "eligibility_label": "Active students in the selected branches and cohort",
+        "winner_types": (),
+    },
+}
+COLLEGE_ELECTION_TYPES = tuple(COLLEGE_ELECTION_POLICIES)
+
 MIN_ADMISSION_YEAR = 2000
 MAX_ADMISSION_YEAR = 2100
 EMAIL_ADDRESS_PATTERN = re.compile(
@@ -3662,6 +3699,8 @@ def create_principal_election():
     data = request.get_json(silent=True) or {}
     title = data.get("title")
     description = data.get("description", "")
+    election_type = data.get("election_type", "PRESIDENT")
+    position_name = data.get("position_name")
     branch_ids = data.get("branch_ids")
     duration = data.get("duration_minutes")
     admission_year = data.get("admission_year")
@@ -3672,6 +3711,15 @@ def create_principal_election():
         return jsonify({"status": "error", "message": "Enter an election title (maximum 200 characters)."}), 400
     if not isinstance(description, str) or len(description.strip()) > 5000:
         return jsonify({"status": "error", "message": "Election description must contain at most 5000 characters."}), 400
+    if not isinstance(election_type, str) or election_type not in COLLEGE_ELECTION_TYPES:
+        return jsonify({"status": "error", "message": "Choose a supported college-level election category."}), 400
+    if position_name is not None and not isinstance(position_name, str):
+        return jsonify({"status": "error", "message": "Invalid representative position name."}), 400
+    position_name = position_name.strip() if isinstance(position_name, str) else None
+    if election_type == "OTHER" and (not position_name or len(position_name) > 120):
+        return jsonify({"status": "error", "message": "Enter an other representative position name (maximum 120 characters)."}), 400
+    if election_type != "OTHER" and position_name:
+        return jsonify({"status": "error", "message": "A custom position name is only valid for Other college positions."}), 400
     if not isinstance(branch_ids, list) or not branch_ids or any(type(value) is not int or value <= 0 for value in branch_ids):
         return jsonify({"status": "error", "message": "Select at least one valid participating branch."}), 400
     branch_ids = sorted(set(branch_ids))
@@ -3702,7 +3750,7 @@ def create_principal_election():
                     return jsonify({"status": "error", "message": "One or more selected branches do not exist or are inactive."}), 400
 
                 # Snapshot active students in the selected branches. The optional
-                # class filter makes presidential-election eligibility explicit;
+                # class filter makes college-election voter eligibility explicit;
                 # the CR-winner rule applies to candidates, not to voters.
                 cur.execute("""
                     SELECT COUNT(*)
@@ -3724,11 +3772,11 @@ def create_principal_election():
 
                 cur.execute("""
                     INSERT INTO elections (
-                        title, description, election_type, branch_id, admission_year, academic_year, semester,
+                        title, description, election_type, position_name, branch_id, admission_year, academic_year, semester,
                         duration_minutes, opens_at, closes_at, status, created_by
                     )
                     VALUES (
-                        %s, %s, 'PRESIDENT', NULL, %s, %s, %s,
+                        %s, %s, %s, %s, NULL, %s, %s, %s,
                         %s,
                         CURRENT_TIMESTAMP,
                         CURRENT_TIMESTAMP + (%s * INTERVAL '1 minute'),
@@ -3738,6 +3786,8 @@ def create_principal_election():
                 """, (
                     title.strip(),
                     description.strip(),
+                    election_type,
+                    position_name,
                     admission_year,
                     academic_year,
                     semester,
@@ -3777,7 +3827,8 @@ def create_principal_election():
                     "election_id": election[0],
                     "title": election[1],
                     "description": description.strip(),
-                    "election_type": "PRESIDENT",
+                    "election_type": election_type,
+                    "position_name": position_name,
                     "branch_ids": branch_ids,
                     "admission_year": admission_year,
                     "academic_year": academic_year,
@@ -3789,8 +3840,8 @@ def create_principal_election():
         return jsonify({
             "status": "ok",
             "message": (
-                "President election created as a draft. Register and approve "
-                "at least two eligible candidates before starting voting."
+                f"{COLLEGE_ELECTION_POLICIES[election_type]['label']} election created as a draft. "
+                "Register and approve at least two eligible candidates before starting voting."
             ),
             "election": {
                 "id": election[0], "title": election[1],
@@ -3800,11 +3851,14 @@ def create_principal_election():
                 "admission_year": admission_year,
                 "academic_year": academic_year,
                 "semester": semester,
+                "election_type": election_type,
+                "position_name": position_name,
+                "candidate_eligibility": COLLEGE_ELECTION_POLICIES[election_type]["eligibility"],
                 "status": "DRAFT",
             },
         }), 201
     except Exception:
-        app.logger.exception("President election creation failed")
+        app.logger.exception("College election creation failed")
         return jsonify({"status": "error", "message": "Could not create the election."}), 503
 
 
@@ -3823,17 +3877,19 @@ def _principal_college_election(cur, election_id, lock=False):
                (SELECT COUNT(*) FROM candidates c
                 WHERE c.election_id = e.id
                   AND c.is_approved = TRUE
-                  AND c.review_status = 'APPROVED') AS approved_candidate_count
+                  AND c.review_status = 'APPROVED') AS approved_candidate_count,
+               e.position_name
         FROM elections e
         WHERE e.id = %s
           AND e.branch_id IS NULL
-          AND e.election_type = 'PRESIDENT'
+          AND e.election_type = ANY(%s)
         {lock_clause};
-    """, (election_id,))
+    """, (election_id, list(COLLEGE_ELECTION_TYPES)))
     return cur.fetchone()
 
 
 def _principal_college_election_payload(row):
+    policy = COLLEGE_ELECTION_POLICIES[row[3]]
     return {
         "id": row[0],
         "title": row[1],
@@ -3850,6 +3906,10 @@ def _principal_college_election_payload(row):
         "participation_count": row[12],
         "candidate_count": row[13],
         "approved_candidate_count": row[14],
+        "position_name": row[15],
+        "position_label": row[15] or policy["label"],
+        "candidate_eligibility": policy["eligibility"],
+        "candidate_eligibility_label": policy["eligibility_label"],
     }
 
 
@@ -3876,12 +3936,13 @@ def list_principal_elections():
                            (SELECT COUNT(*) FROM candidates c
                             WHERE c.election_id = e.id
                               AND c.is_approved = TRUE
-                              AND c.review_status = 'APPROVED')
+                              AND c.review_status = 'APPROVED'),
+                           e.position_name
                     FROM elections e
                     WHERE e.branch_id IS NULL
-                      AND e.election_type = 'PRESIDENT'
+                      AND e.election_type = ANY(%s)
                     ORDER BY e.created_at DESC, e.id DESC;
-                """)
+                """, (list(COLLEGE_ELECTION_TYPES),))
                 elections = [
                     _principal_college_election_payload(row)
                     for row in cur.fetchall()
@@ -3948,34 +4009,38 @@ def list_principal_election_candidates(election_id):
         }), 503
 
 
-def _principal_eligible_candidate(cur, election_id, usn):
-    """Find an actual elected CR from a branch selected for this election.
+def _principal_eligible_candidates(cur, election_id, election_type, usn=None):
+    """Return students eligible to stand in a college-wide election.
 
-    A CR flag alone is not enough for presidential candidacy. The student must
-    have won at least one completed branch CR election (a non-zero winning
-    ballot total, including a genuine tie). This check is repeated on every
-    administrative candidate-registration request.
+    The selected branches and optional cohort always apply.  Where the policy
+    requires an elected representative, a student must be an approved
+    candidate with a non-zero, tied-or-winning total in a *closed* CR/FR
+    election.  A legacy ``is_cr``/``is_fr`` flag is never sufficient.
     """
+    policy = COLLEGE_ELECTION_POLICIES[election_type]
+    winner_types = list(policy["winner_types"])
     cur.execute("""
-        SELECT s.id, s.full_name, b.name
+        SELECT DISTINCT s.id, s.full_name, s.usn, b.name
         FROM students s
         JOIN accounts a ON a.id = s.account_id
         JOIN branches b ON b.id = s.branch_id
         JOIN election_eligible_branches eb
           ON eb.branch_id = s.branch_id AND eb.election_id = %s
-        JOIN elections presidential_election
-          ON presidential_election.id = eb.election_id
-        WHERE UPPER(s.usn) = %s
+        JOIN elections college_election
+          ON college_election.id = eb.election_id
+        WHERE (%s::text IS NULL OR UPPER(s.usn) = %s)
           AND a.role = 'STUDENT'
           AND a.is_active = TRUE
           AND b.is_active = TRUE
-          AND (presidential_election.admission_year IS NULL
-               OR s.admission_year = presidential_election.admission_year)
-          AND (presidential_election.academic_year IS NULL
-               OR s.academic_year = presidential_election.academic_year)
-          AND (presidential_election.semester IS NULL
-               OR s.semester = presidential_election.semester)
-          AND EXISTS (
+          AND (college_election.admission_year IS NULL
+               OR s.admission_year = college_election.admission_year)
+          AND (college_election.academic_year IS NULL
+               OR s.academic_year = college_election.academic_year)
+          AND (college_election.semester IS NULL
+               OR s.semester = college_election.semester)
+          AND (
+              cardinality(%s::text[]) = 0
+              OR EXISTS (
               SELECT 1
               FROM elections branch_election
               JOIN candidates elected
@@ -3984,7 +4049,7 @@ def _principal_eligible_candidate(cur, election_id, usn):
                AND elected.is_approved = TRUE
                AND elected.review_status = 'APPROVED'
               WHERE branch_election.branch_id = s.branch_id
-                AND branch_election.election_type = 'CR'
+                AND branch_election.election_type = ANY(%s::text[])
                 AND branch_election.status = 'CLOSED'
                 AND (
                     SELECT COUNT(*)
@@ -4008,15 +4073,23 @@ def _principal_eligible_candidate(cur, election_id, usn):
                             AND elected_ballot.candidate_id = elected.id
                       )
                 )
-          );
-    """, (election_id, usn))
-    return cur.fetchone()
+              )
+          )
+        ORDER BY b.name, s.usn;
+    """, (election_id, usn, usn, winner_types, winner_types))
+    return cur.fetchall()
+
+
+def _principal_eligible_candidate(cur, election_id, election_type, usn):
+    """Return one policy-eligible student for registration, if present."""
+    candidates = _principal_eligible_candidates(cur, election_id, election_type, usn)
+    return candidates[0] if candidates else None
 
 
 @app.get("/api/principal/elections/<int:election_id>/eligible-candidates")
 @limiter.limit("60 per minute")
 def list_principal_eligible_candidates(election_id):
-    """List selected-branch CR winners who may stand for President."""
+    """List the students eligible under the college election's policy."""
     auth_error = require_principal()
     if auth_error:
         return auth_error
@@ -4026,58 +4099,16 @@ def list_principal_eligible_candidates(election_id):
                 election = _principal_college_election(cur, election_id)
                 if not election:
                     return jsonify({"status": "error", "message": "College-wide election not found."}), 404
-                cur.execute("""
-                    SELECT DISTINCT s.usn, b.name
-                    FROM students s
-                    JOIN accounts a ON a.id = s.account_id
-                    JOIN branches b ON b.id = s.branch_id
-                    JOIN election_eligible_branches eb
-                      ON eb.branch_id = s.branch_id AND eb.election_id = %s
-                    JOIN elections presidential_election
-                      ON presidential_election.id = eb.election_id
-                    WHERE a.role = 'STUDENT'
-                      AND a.is_active = TRUE
-                      AND b.is_active = TRUE
-                      AND (presidential_election.admission_year IS NULL
-                           OR s.admission_year = presidential_election.admission_year)
-                      AND (presidential_election.academic_year IS NULL
-                           OR s.academic_year = presidential_election.academic_year)
-                      AND (presidential_election.semester IS NULL
-                           OR s.semester = presidential_election.semester)
-                      AND EXISTS (
-                          SELECT 1
-                          FROM elections branch_election
-                          JOIN candidates elected
-                            ON elected.election_id = branch_election.id
-                           AND elected.student_id = s.id
-                           AND elected.is_approved = TRUE
-                           AND elected.review_status = 'APPROVED'
-                          WHERE branch_election.branch_id = s.branch_id
-                            AND branch_election.election_type = 'CR'
-                            AND branch_election.status = 'CLOSED'
-                            AND (SELECT COUNT(*) FROM ballots winning_ballot
-                                 WHERE winning_ballot.election_id = branch_election.id
-                                   AND winning_ballot.candidate_id = elected.id) > 0
-                            AND NOT EXISTS (
-                                SELECT 1 FROM candidates challenger
-                                WHERE challenger.election_id = branch_election.id
-                                  AND challenger.is_approved = TRUE
-                                  AND challenger.review_status = 'APPROVED'
-                                  AND (SELECT COUNT(*) FROM ballots challenger_ballot
-                                       WHERE challenger_ballot.election_id = branch_election.id
-                                         AND challenger_ballot.candidate_id = challenger.id)
-                                      > (SELECT COUNT(*) FROM ballots elected_ballot
-                                         WHERE elected_ballot.election_id = branch_election.id
-                                           AND elected_ballot.candidate_id = elected.id)
-                            )
-                      )
-                    ORDER BY b.name, s.usn;
-                """, (election_id,))
-                candidates = [{"usn": row[0], "branch": row[1]} for row in cur.fetchall()]
-        return jsonify({"status": "ok", "candidates": candidates}), 200
+                rows = _principal_eligible_candidates(cur, election_id, election[3])
+                candidates = [{"usn": row[2], "branch": row[3]} for row in rows]
+        return jsonify({
+            "status": "ok",
+            "candidate_eligibility": COLLEGE_ELECTION_POLICIES[election[3]]["eligibility"],
+            "candidates": candidates,
+        }), 200
     except Exception:
-        app.logger.exception("Eligible presidential candidate list retrieval failed")
-        return jsonify({"status": "error", "message": "Could not load eligible CR winners."}), 503
+        app.logger.exception("Eligible college candidate list retrieval failed")
+        return jsonify({"status": "error", "message": "Could not load eligible candidates."}), 503
 
 
 @app.post("/api/principal/elections/<int:election_id>/candidates")
@@ -4113,11 +4144,11 @@ def add_principal_election_candidate(election_id):
                         "status": "error",
                         "message": "Candidates can be registered only while the election is a draft.",
                     }), 409
-                student = _principal_eligible_candidate(cur, election_id, usn)
+                student = _principal_eligible_candidate(cur, election_id, election[3], usn)
                 if not student:
                     return jsonify({
                         "status": "error",
-                        "message": "This student is not a verified CR winner from a selected branch.",
+                        "message": "This student does not satisfy the candidate policy for the selected branches and cohort.",
                     }), 404
                 cur.execute("""
                     SELECT 1 FROM candidates
@@ -4155,7 +4186,7 @@ def add_principal_election_candidate(election_id):
                 "id": candidate_id,
                 "name": student[1],
                 "usn": usn,
-                "branch": student[2],
+                "branch": student[3],
                 "manifesto": manifesto,
                 "symbol_key": symbol_key,
                 "symbol": candidate_symbol_payload(symbol_key),
@@ -7875,9 +7906,28 @@ def cast_student_vote(election_id):
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                student = _student_record(cur, session["account_id"])
+                # Re-check and lock account/branch state in the same
+                # transaction as participation.  The session guard above is
+                # deliberately not treated as an authorization snapshot:
+                # a concurrent HOD deactivation or branch disable must win
+                # before a ballot can be committed.
+                cur.execute("""
+                    SELECT s.id
+                    FROM students s
+                    JOIN accounts a ON a.id = s.account_id
+                    JOIN branches b ON b.id = s.branch_id
+                    WHERE a.id = %s
+                      AND a.role = 'STUDENT'
+                      AND a.is_active = TRUE
+                      AND b.is_active = TRUE
+                    FOR SHARE OF s, a, b;
+                """, (session["account_id"],))
+                student = cur.fetchone()
                 if not student:
-                    return jsonify({"status": "error", "message": "Student profile was not found."}), 404
+                    return jsonify({
+                        "status": "error",
+                        "message": "Your student account is inactive or has no active department.",
+                    }), 403
                 student_id = student[0]
                 # Lock the election so its lifecycle cannot change during ballot submission.
                 cur.execute("""
@@ -7922,6 +7972,15 @@ def cast_student_vote(election_id):
                 """, (election_id, candidate_id))
                 # Never return the ballot reference: it is not a voter receipt.
                 cur.fetchone()
+                # The audit event intentionally contains neither a student
+                # identifier nor a ballot reference/candidate.  It proves
+                # that a complete vote transaction occurred while preserving
+                # the required separation of participation and ballot data.
+                write_audit_event(cur, "VOTE_RECORDED", {
+                    "election_id": election_id,
+                    "participation_recorded": True,
+                    "ballot_recorded": True,
+                }, election_id)
         return jsonify({"status": "ok", "message": "Your vote has been recorded successfully."}), 201
     except Exception:
         app.logger.exception("Anonymous ballot submission failed")

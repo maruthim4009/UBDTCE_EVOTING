@@ -51,6 +51,14 @@ const roles = [
   },
 ];
 
+const collegeElectionTypeOptions = [
+  { value: "PRESIDENT", label: "College President", candidateRule: "Candidates must be verified winners of completed CR elections." },
+  { value: "JOINT_SECRETARY", label: "Joint Secretary", candidateRule: "Candidates must be verified winners of completed CR or FR elections." },
+  { value: "CULTURAL", label: "Cultural President", candidateRule: "Candidates are active students in the selected branches and cohort." },
+  { value: "SPORTS", label: "Sports President", candidateRule: "Candidates are active students in the selected branches and cohort." },
+  { value: "OTHER", label: "Other representative position", candidateRule: "Candidates are active students in the selected branches and cohort." },
+];
+
 function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [selectedRole, setSelectedRole] = useState(() => {
@@ -109,6 +117,8 @@ const [emailResendIn, setEmailResendIn] = useState(0);
   const [principalSection, setPrincipalSection] = useState("overview");
   const [dashboardTheme, setDashboardTheme] = useState("light");
   const [electionTitle, setElectionTitle] = useState("");
+  const [collegeElectionType, setCollegeElectionType] = useState("PRESIDENT");
+  const [collegePositionName, setCollegePositionName] = useState("");
   const [electionDuration, setElectionDuration] = useState("30");
   const [presidentAdmissionYear, setPresidentAdmissionYear] = useState("");
   const [presidentAcademicYear, setPresidentAcademicYear] = useState("");
@@ -1169,6 +1179,11 @@ useEffect(() => {
       setElectionMessageType("error");
       return;
     }
+    if (collegeElectionType === "OTHER" && !collegePositionName.trim()) {
+      setElectionMessage("Enter the representative position name.");
+      setElectionMessageType("error");
+      return;
+    }
     const cohortValues = [
       presidentAdmissionYear,
       presidentAcademicYear,
@@ -1183,9 +1198,13 @@ useEffect(() => {
     try {
       const requestBody = {
         title: electionTitle.trim(),
+        election_type: collegeElectionType,
         branch_ids: selectedElectionBranches,
         duration_minutes: Number(electionDuration),
       };
+      if (collegeElectionType === "OTHER") {
+        requestBody.position_name = collegePositionName.trim();
+      }
       if (cohortValues.every(Boolean)) {
         requestBody.admission_year = Number(presidentAdmissionYear);
         requestBody.academic_year = Number(presidentAcademicYear);
@@ -1202,6 +1221,8 @@ useEffect(() => {
       setElectionMessage(data.message || "Election created successfully.");
       setElectionMessageType("success");
       setElectionTitle("");
+      setCollegeElectionType("PRESIDENT");
+      setCollegePositionName("");
       setPresidentAdmissionYear("");
       setPresidentAcademicYear("");
       setPresidentSemester("");
@@ -1247,7 +1268,7 @@ useEffect(() => {
         eligibleResponse.json().catch(() => ({})),
       ]);
       if (!response.ok) throw new Error(data.message || "Could not load candidates.");
-      if (!eligibleResponse.ok) throw new Error(eligibleData.message || "Could not load eligible CR winners.");
+      if (!eligibleResponse.ok) throw new Error(eligibleData.message || "Could not load eligible candidates.");
       setPrincipalCandidates(Array.isArray(data.candidates) ? data.candidates : []);
       setEligiblePrincipalCandidates(Array.isArray(eligibleData.candidates) ? eligibleData.candidates : []);
     } catch (error) {
@@ -2542,6 +2563,31 @@ const registeredBranchCount = dashboardBranches.length;
                             required
                           />
                         </div>
+                        <div className="principal-election-field">
+                          <label htmlFor="collegeElectionType">Representative position</label>
+                          <select
+                            id="collegeElectionType"
+                            value={collegeElectionType}
+                            onChange={(event) => setCollegeElectionType(event.target.value)}
+                          >
+                            {collegeElectionTypeOptions.map((option) => (
+                              <option key={option.value} value={option.value}>{option.label}</option>
+                            ))}
+                          </select>
+                        </div>
+                        {collegeElectionType === "OTHER" && (
+                          <div className="principal-election-field">
+                            <label htmlFor="collegePositionName">Position name</label>
+                            <input
+                              id="collegePositionName"
+                              value={collegePositionName}
+                              onChange={(event) => setCollegePositionName(event.target.value)}
+                              maxLength={120}
+                              placeholder="e.g. Student Welfare Secretary"
+                              required
+                            />
+                          </div>
+                        )}
                         <div className="principal-election-field principal-election-duration-field">
                           <label htmlFor="principalElectionDuration">Voting duration</label>
                           <select
@@ -2661,7 +2707,7 @@ const registeredBranchCount = dashboardBranches.length;
                       )}
 
                       <div className="principal-election-form-footer">
-                        <p>Voting duration: <strong>{Number(electionDuration) < 60 ? `${electionDuration} minutes` : Number(electionDuration) === 1440 ? "24 hours" : Number(electionDuration) % 60 === 0 ? `${Number(electionDuration) / 60} hours` : `${electionDuration} minutes`}</strong>. Voters are restricted to active students in the selected branches{presidentAdmissionYear && presidentAcademicYear && presidentSemester ? ` in admission year ${presidentAdmissionYear}, academic year ${presidentAcademicYear}, semester ${presidentSemester}` : ""}. Presidential candidates must be verified CR election winners.</p>
+                        <p>Voting duration: <strong>{Number(electionDuration) < 60 ? `${electionDuration} minutes` : Number(electionDuration) === 1440 ? "24 hours" : Number(electionDuration) % 60 === 0 ? `${Number(electionDuration) / 60} hours` : `${electionDuration} minutes`}</strong>. Voters are restricted to active students in the selected branches{presidentAdmissionYear && presidentAcademicYear && presidentSemester ? ` in admission year ${presidentAdmissionYear}, academic year ${presidentAcademicYear}, semester ${presidentSemester}` : ""}. {collegeElectionTypeOptions.find((option) => option.value === collegeElectionType)?.candidateRule}</p>
                         <button
                           type="submit"
                           className="principal-primary-button"
@@ -2692,7 +2738,8 @@ const registeredBranchCount = dashboardBranches.length;
                         {principalElections.map((election) => (
                           <article className="principal-election-existing-card" key={election.id}>
                             <div>
-                              <h3>{election.title}</h3>
+                              <h3>{election.position_label || election.title}</h3>
+                              {election.position_label && election.position_label !== election.title && <p>{election.title}</p>}
                               {election.description && <p>{election.description}</p>}
                               <p>
                                 <strong>{election.status}</strong>
@@ -2746,7 +2793,7 @@ const registeredBranchCount = dashboardBranches.length;
                             <form className="principal-election-form" onSubmit={handlePrincipalCandidateSubmit}>
                               <div className="principal-election-fields">
                                 <div className="principal-election-field">
-                                  <label htmlFor="principalCandidateUsn">Verified CR winner USN</label>
+                                  <label htmlFor="principalCandidateUsn">Eligible candidate USN</label>
                                   <input
                                     id="principalCandidateUsn"
                                     value={principalCandidateUsn}
@@ -2782,7 +2829,7 @@ const registeredBranchCount = dashboardBranches.length;
                                   />
                                 </div>
                               </div>
-                              <p className="principal-election-eligibility-note">Only CRs with a non-zero winning total in a completed branch election from a selected department are available. {eligiblePrincipalCandidates.length} eligible winner(s) found.</p>
+                              <p className="principal-election-eligibility-note">{selectedElection?.candidate_eligibility_label || "Only students eligible under this election's policy are available."} {eligiblePrincipalCandidates.length} eligible candidate(s) found.</p>
                               <button type="submit" className="principal-primary-button" disabled={!candidateSymbols.length}>Register candidate</button>
                             </form>
                           )}
